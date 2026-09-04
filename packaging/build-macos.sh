@@ -2,7 +2,15 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "$0")/.." && pwd)"
-python_bin="${PYTHON_BIN:-python3.11}"
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  python_bin="$PYTHON_BIN"
+elif [[ -x "$project_dir/.venv/bin/python" ]]; then
+  python_bin="$project_dir/.venv/bin/python"
+else
+  bootstrap_python="$(command -v python3.11 || command -v python3)"
+  "$bootstrap_python" -m venv "$project_dir/.venv"
+  python_bin="$project_dir/.venv/bin/python"
+fi
 cd "$project_dir"
 "$python_bin" -m pip install -e '.[dev]'
 "$python_bin" -m PyInstaller --noconfirm --clean packaging/xiaobai-connector.spec
