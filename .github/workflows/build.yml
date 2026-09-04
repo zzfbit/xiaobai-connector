@@ -1,0 +1,34 @@
+name: Build desktop Connector
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            artifact: xiaobai-connector-macos
+          - os: windows-latest
+            artifact: xiaobai-connector-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build macOS
+        if: runner.os == 'macOS'
+        run: ./packaging/build-macos.sh
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/build-windows.ps1
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
