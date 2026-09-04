@@ -1,0 +1,21 @@
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+*.spec.user
+.DS_Store
+.env
+.env.*
+*.log
+config.json
+spool.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+Xiaobai Connector.app/
+*.dmg
+*.exe

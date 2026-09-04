@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xiaobai-connector"
+version = "0.1.0"
+description = "Cross-platform desktop Connector for Xiaobai local Agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "websockets>=17,<18",
+  "keyring>=25,<26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pyinstaller>=6,<7"]
+
+[project.scripts]
+xiaobai-connector = "xiaobai_connector.ui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

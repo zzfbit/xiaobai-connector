@@ -1,0 +1,2 @@
+websockets>=17,<18
+keyring>=25,<26

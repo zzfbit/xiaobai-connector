@@ -1,0 +1,45 @@
+"""Select adapters only from the Connector's locally saved snapshot."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..models import ExecutionAdapter, LocalAgent
+from .claude import ClaudeAdapter
+from .codex import CodexAdapter
+from .hermes import HermesAdapter
+
+
+class AdapterRouter:
+    def __init__(self, definitions: list[dict[str, Any]]):
+        self._adapters: dict[str, ExecutionAdapter] = {}
+        for definition in definitions:
+            if not bool(definition.get("enabled")):
+                continue
+            adapter_name = str(definition.get("adapter") or "").lower()
+            if adapter_name == "codex":
+                adapter: ExecutionAdapter = CodexAdapter(definition)
+            elif adapter_name == "claude":
+                adapter = ClaudeAdapter(definition)
+            elif adapter_name == "hermes":
+                adapter = HermesAdapter(definition)
+            else:
+                continue
+            local_ref = str(definition.get("local_ref") or "").strip()
+            if local_ref:
+                self._adapters[local_ref] = adapter
+
+    def discover(self) -> list[LocalAgent]:
+        result: list[LocalAgent] = []
+        for local_ref, adapter in self._adapters.items():
+            result.extend(adapter.discover())
+        return result
+
+    def adapter_for(self, local_ref: str) -> ExecutionAdapter:
+        try:
+            return self._adapters[local_ref]
+        except KeyError as exc:
+            raise RuntimeError("Agent 不属于当前 Connector 或已被禁用") from exc
+
+    def contains(self, local_ref: str) -> bool:
+        return local_ref in self._adapters
