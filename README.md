@@ -41,7 +41,7 @@ python3.11 -m venv .venv
 ./packaging/build-windows.ps1
 ```
 
-GitHub Actions 会在 macOS 和 Windows runner 上生成对应的 PyInstaller 构建产物。签名、公证和 Windows 代码签名需要在发布时补充各平台的证书，不把证书或 token 放进仓库。
+仓库提供 macOS 和 Windows 的构建脚本；Windows 需要在 Windows 电脑或 CI runner 上运行，PyInstaller 不能从 macOS 直接生成可用的 Windows 安装包。签名、公证和 Windows 代码签名需要在发布时补充各平台的证书，不把证书或 token 放进仓库。
 
 ## 安全边界
 
