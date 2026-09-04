@@ -19,6 +19,8 @@ from .base import Emit, LocalAgent, RunControl, RunRequest, request_prompt
 
 
 READ_LIMIT = 64 * 1024 * 1024
+CHATGPT_CODEX_BINARY = Path(
+    "/Applications/ChatGPT.app/Contents/Resources/codex")
 INTERNAL_NOTIFICATION_METHODS = [
     "thread/status/changed", "thread/tokenUsage/updated", "turn/diff/updated",
     "turn/plan/updated", "hook/started", "hook/completed", "item/started",
@@ -31,15 +33,47 @@ INTERNAL_NOTIFICATION_METHODS = [
 ]
 
 
+class CodexQueueError(RuntimeError):
+    """A desktop-thread queue bridge failure with a retryable RPC hint."""
+
+    def __init__(self, message: str, *, code: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def resolve_codex_binary(configured: str | None = None) -> str:
+    """Use the Codex runtime shipped with the desktop app when available.
+
+    The standalone ``codex`` executable and ChatGPT's bundled app-server can
+    be different versions.  Desktop follow-ups use ``thread/queue/add``, which
+    older standalone binaries do not understand.  An explicit environment
+    override remains available for custom installations and tests.
+    """
+    explicit = str(os.environ.get("XIAOBAI_CODEX_BIN") or "").strip()
+    if explicit:
+        return explicit
+    if CHATGPT_CODEX_BINARY.is_file() and os.access(CHATGPT_CODEX_BINARY, os.X_OK):
+        return str(CHATGPT_CODEX_BINARY)
+    configured_value = str(configured or "").strip()
+    if configured_value and (
+            Path(configured_value).expanduser().is_file()
+            or shutil.which(configured_value)):
+        return configured_value
+    return shutil.which("codex") or configured_value or "codex"
+
+
+def _codex_available(binary: str) -> bool:
+    path = Path(binary).expanduser()
+    return bool(shutil.which(binary) or (path.is_file() and os.access(path, os.X_OK)))
+
+
 class CodexAdapter:
     def __init__(self, definition: dict[str, Any] | None = None):
         self.definition = dict(definition or {})
-        self.binary = (str(self.definition.get("binary") or "").strip()
-                       or os.environ.get("XIAOBAI_CODEX_BIN")
-                       or shutil.which("codex") or "codex")
+        self.binary = resolve_codex_binary(self.definition.get("binary"))
 
     def discover(self) -> list[LocalAgent]:
-        available = bool(shutil.which(self.binary) or Path(self.binary).is_file())
+        available = _codex_available(self.binary)
         return [LocalAgent(
             local_ref=str(self.definition.get("local_ref") or "codex:default"),
             adapter="codex",
@@ -53,7 +87,7 @@ class CodexAdapter:
 
     async def execute(self, request: RunRequest, emit: Emit,
                       control: RunControl) -> None:
-        if not (shutil.which(self.binary) or Path(self.binary).is_file()):
+        if not _codex_available(self.binary):
             raise RuntimeError("没有找到 Codex 命令，请重新扫描本机 Agent")
         session = dict(request.payload.get("codex_session") or {})
         workdir = Path(str(session.get("cwd") or self.definition.get("workdir") or Path.home()))
@@ -260,3 +294,106 @@ class CodexAdapter:
             raise RuntimeError("Codex app-server 返回了无效 JSON") from exc
         finally:
             await cleanup()
+
+    async def queue_thread_message(self, *, thread_id: str, text: str,
+                                   attachments: list[dict[str, Any]] | None = None,
+                                   client_message_id: str) -> bool:
+        """Insert a phone message into a desktop-owned Codex thread.
+
+        The ChatGPT desktop app owns the long-lived writer for the thread.  A
+        short-lived app-server bridge may therefore only call
+        ``thread/queue/add``; opening another ``thread/resume`` would race the
+        desktop process and make the phone message appear to disappear.
+        """
+        if not _codex_available(self.binary):
+            raise CodexQueueError("没有找到 Codex 命令，请重新扫描本机 Agent")
+        request = RunRequest(
+            run_id="queue-" + str(client_message_id or ""),
+            agent_id=str(self.definition.get("agent_id") or "codex"),
+            local_ref=str(self.definition.get("local_ref") or "codex:default"),
+            text=str(text or "").strip(), deadline_at="",
+            payload={"input": {"attachments": list(attachments or [])}},
+        )
+        queued_text = request_prompt(request)
+        if not queued_text.strip():
+            raise CodexQueueError("Codex 插话内容为空")
+        if not str(thread_id or "").strip():
+            raise CodexQueueError("Codex 会话 ID 为空")
+
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "app-server", "--stdio", stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True, limit=READ_LIMIT)
+        request_id = 1
+
+        async def send(method: str, params: dict[str, Any], rpc_id: int) -> None:
+            if proc.stdin is None:
+                raise CodexQueueError("Codex app-server 输入流不可用")
+            value = {"id": rpc_id, "method": method, "params": params}
+            proc.stdin.write((json.dumps(value, ensure_ascii=False) + "\n").encode())
+            await proc.stdin.drain()
+
+        async def response(rpc_id: int) -> dict[str, Any]:
+            if proc.stdout is None:
+                raise CodexQueueError("Codex app-server 输出流不可用")
+            deadline = asyncio.get_running_loop().time() + 20
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise CodexQueueError("本机 Codex 队列响应超时")
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(), remaining)
+                except asyncio.TimeoutError as exc:
+                    raise CodexQueueError("本机 Codex 队列响应超时") from exc
+                if not raw:
+                    raise CodexQueueError("Codex app-server 提前退出")
+                try:
+                    value = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(value, dict) or value.get("id") != rpc_id:
+                    continue
+                error = value.get("error")
+                if error:
+                    if isinstance(error, dict):
+                        message = str(error.get("message") or error)[:500]
+                        raise CodexQueueError(message, code=error.get("code"))
+                    raise CodexQueueError(str(error)[:500])
+                result = value.get("result")
+                return dict(result) if isinstance(result, dict) else {}
+
+        try:
+            await send("initialize", {
+                "clientInfo": {"name": "xiaobai-connector", "version": "0.2.0"},
+                "capabilities": {
+                    "experimentalApi": True,
+                    "optOutNotificationMethods": INTERNAL_NOTIFICATION_METHODS,
+                },
+            }, request_id)
+            await response(request_id)
+            request_id += 1
+            if proc.stdin is None:
+                raise CodexQueueError("Codex app-server 输入流不可用")
+            proc.stdin.write(b'{"method":"initialized","params":{}}\n')
+            await proc.stdin.drain()
+            await send("thread/queue/add", {
+                "threadId": str(thread_id).strip(),
+                "input": [{"type": "text", "text": queued_text}],
+                "clientUserMessageId": str(client_message_id or "").strip(),
+            }, request_id)
+            await response(request_id)
+            return True
+        except CodexQueueError:
+            raise
+        except (OSError, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            raise CodexQueueError(str(exc)[:500]) from exc
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()

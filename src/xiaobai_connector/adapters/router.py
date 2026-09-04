@@ -43,3 +43,18 @@ class AdapterRouter:
 
     def contains(self, local_ref: str) -> bool:
         return local_ref in self._adapters
+
+    async def queue_thread_message(self, *, local_ref: str, thread_id: str,
+                                   text: str,
+                                   attachments: list[dict[str, Any]] | None = None,
+                                   client_message_id: str) -> bool:
+        """Route a desktop-thread queue insertion to its local adapter."""
+        adapter = self._adapters.get(local_ref)
+        if adapter is None:
+            return False
+        queue = getattr(adapter, "queue_thread_message", None)
+        if not callable(queue):
+            return False
+        return bool(await queue(
+            thread_id=thread_id, text=text, attachments=attachments,
+            client_message_id=client_message_id))

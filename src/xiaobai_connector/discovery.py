@@ -16,6 +16,10 @@ from pathlib import Path
 from .models import AgentCandidate
 
 
+CHATGPT_CODEX_BINARY = Path(
+    "/Applications/ChatGPT.app/Contents/Resources/codex")
+
+
 def _search_dirs() -> list[Path]:
     home = Path.home()
     values = [
@@ -64,6 +68,13 @@ def _which(names: tuple[str, ...]) -> str | None:
     return None
 
 
+def _codex_binary() -> str | None:
+    """Prefer the app-server shipped with ChatGPT on macOS."""
+    if CHATGPT_CODEX_BINARY.is_file() and os.access(CHATGPT_CODEX_BINARY, os.X_OK):
+        return str(CHATGPT_CODEX_BINARY)
+    return _which(("codex",))
+
+
 def _command(path: str, *args: str) -> list[str]:
     if platform.system() == "Windows" and Path(path).suffix.lower() in {".cmd", ".bat"}:
         return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", path, *args]
@@ -106,8 +117,21 @@ def _candidate(kind: str, name: str, names: tuple[str, ...], *,
 
 def scan_agents() -> list[AgentCandidate]:
     home = Path.home()
+    codex = _codex_binary()
+    codex_candidate = _candidate(
+        "codex", "Codex", ("codex",),
+        capabilities=("chat", "stream", "cancel", "steer"))
+    if codex:
+        # Keep the setup wizard's persisted binary aligned with the runtime
+        # resolver; otherwise an old PATH CLI would be displayed and saved even
+        # though desktop queue operations use ChatGPT's bundled Codex.
+        codex_candidate.executable = codex
+        codex_candidate.version = _version(codex)
+        codex_candidate.status = "online"
+        codex_candidate.detail = "已找到 Codex 桌面 app-server"
+        codex_candidate.selected = True
     return [
-        _candidate("codex", "Codex", ("codex",), capabilities=("chat", "stream", "cancel", "steer")),
+        codex_candidate,
         _candidate("claude", "Claude Code", ("claude",), capabilities=("chat", "stream", "cancel")),
         _candidate(
             "hermes", "Hermes", ("hermes", "hermes-cli"),

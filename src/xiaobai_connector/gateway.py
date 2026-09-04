@@ -13,6 +13,7 @@ from typing import Any, Callable
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+from .adapters.codex import CodexQueueError
 from .adapters.router import AdapterRouter
 from .config import ConnectorConfig
 from .models import RunControl, RunRequest
@@ -43,6 +44,32 @@ class GatewayClient:
                 self._on_status(state, detail)
             except Exception:
                 pass
+
+    @staticmethod
+    def _queue_error(exc: BaseException | None = None) -> dict[str, Any]:
+        """Convert a local desktop queue failure into a retryable ACK."""
+        raw = str(exc or "").strip()
+        rpc_code = str(getattr(exc, "code", "") or "").strip()
+        lowered = raw.lower()
+        if (rpc_code in {"-32600", "invalid_request"}
+                or "unknown variant `thread/queue/add`" in lowered
+                or "unknown method" in lowered):
+            return {
+                "code": "queue_protocol_unsupported",
+                "message": "本机 Codex 不支持桌面消息队列，请更新 Connector",
+                "retryable": True,
+            }
+        if "no rollout found" in lowered or "找不到这条 codex 会话" in lowered:
+            return {
+                "code": "thread_not_found",
+                "message": "桌面 Codex 会话已经不存在，请重新选择会话",
+                "retryable": False,
+            }
+        return {
+            "code": "queue_failed",
+            "message": raw[:500] if raw else "桌面 Codex 队列暂时未接收消息",
+            "retryable": True,
+        }
 
     def connection_url(self) -> str:
         split = urllib.parse.urlsplit(self.config.server_url)
@@ -181,22 +208,44 @@ class GatewayClient:
                 fresh = self.spool.persist_command(envelope.event_id, envelope.type,
                                                     envelope.payload)
                 if envelope.type in {"run.steer", "codex.thread.queue"}:
-                    delivered = await self._dispatch(envelope)
-                    response = ack(envelope, accepted=delivered,
-                                   extra={"duplicate": not fresh} if delivered else None,
-                                   error=None if delivered else {
-                                       "code": "run_not_active", "message": "本机任务已经结束",
-                                       "retryable": True})
+                    command_state = self.spool.command_state(envelope.event_id)
+                    if fresh or command_state == "persisted":
+                        delivered = await self._dispatch(envelope)
+                        if delivered:
+                            self.spool.set_command_state(envelope.event_id, "finished")
+                            response = ack(envelope, accepted=True,
+                                           extra={"duplicate": not fresh})
+                        else:
+                            self.spool.set_command_state(envelope.event_id, "failed")
+                            error = (self._queue_error()
+                                     if envelope.type == "codex.thread.queue" else {
+                                         "code": "run_not_active",
+                                         "message": "本机任务已经结束",
+                                         "retryable": True})
+                            response = ack(envelope, accepted=False, error=error)
+                    elif command_state == "failed":
+                        error = (self._queue_error()
+                                 if envelope.type == "codex.thread.queue" else {
+                                     "code": "run_not_active",
+                                     "message": "本机任务已经结束",
+                                     "retryable": True})
+                        response = ack(envelope, accepted=False, error=error)
+                    else:
+                        response = ack(envelope, accepted=True,
+                                       extra={"duplicate": True})
                     async with lock:
                         await websocket.send(response.dumps())
-                    if delivered:
-                        self.spool.set_command_state(envelope.event_id, "finished")
                 else:
                     async with lock:
                         await websocket.send(ack(envelope, accepted=True,
                                                  extra={"duplicate": not fresh}).dumps())
                     if fresh:
                         await self._dispatch(envelope)
+            except CodexQueueError as exc:
+                self.spool.set_command_state(envelope.event_id, "failed")
+                async with lock:
+                    await websocket.send(ack(
+                        envelope, accepted=False, error=self._queue_error(exc)).dumps())
             except (ValueError, KeyError, RuntimeError) as exc:
                 async with lock:
                     await websocket.send(ack(envelope, accepted=False, error={
@@ -243,7 +292,13 @@ class GatewayClient:
                 **payload, "approved": envelope.type == "run.approve"})
             return True
         if envelope.type == "codex.thread.queue":
-            return False
+            return bool(await self.router.queue_thread_message(
+                local_ref=str(payload.get("local_ref") or ""),
+                thread_id=str(payload.get("thread_id") or ""),
+                text=str(payload.get("text") or ""),
+                attachments=list(payload.get("attachments") or []),
+                client_message_id=str(payload.get("client_message_id") or ""),
+            ))
         return False
 
     async def _execute(self, envelope: Any, control: RunControl) -> None:
