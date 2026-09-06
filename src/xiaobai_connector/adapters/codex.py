@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from .. import __version__
 from .base import Emit, LocalAgent, RunControl, RunRequest, request_prompt
 
 
@@ -364,7 +365,7 @@ class CodexAdapter:
 
         try:
             await send("initialize", {
-                "clientInfo": {"name": "xiaobai-connector", "version": "0.2.0"},
+                "clientInfo": {"name": "xiaobai-connector", "version": __version__},
                 "capabilities": {
                     "experimentalApi": True,
                     "optOutNotificationMethods": INTERNAL_NOTIFICATION_METHODS,

@@ -1,10 +1,13 @@
 # PyInstaller spec for the standalone desktop wizard.
 import sys
+import tomllib
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
 
 project = Path(SPECPATH).parent
+with (project / "pyproject.toml").open("rb") as handle:
+    project_version = str(tomllib.load(handle)["project"]["version"])
 hiddenimports = collect_submodules("websockets") + ["keyring.backends.Windows", "keyring.backends.macOS"]
 
 a = Analysis(
@@ -36,6 +39,7 @@ if sys.platform == "darwin":
         name="Xiaobai Connector.app",
         icon=None,
         bundle_identifier="com.xiaobaizzf.connector",
+        version=project_version,
     )
 else:
     exe = EXE(

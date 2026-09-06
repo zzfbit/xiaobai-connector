@@ -31,6 +31,22 @@ python3.11 -m venv .venv
 
 开发环境中可用 `XIAOBAI_CONNECTOR_SERVER_URL` 覆盖默认服务器地址。配对服务使用同一地址的 HTTP 入口（例如 `wss://api.xiaobaizzf.com/agent/connect` 对应 `https://api.xiaobaizzf.com`）。
 
+## 从 voice 同步并更新安装包
+
+独立版和 /Users/a123456/voice/integrations/connector 的运行时目录结构不同，不能直接把整个目录覆盖过去。仓库提供一键同步检查、回归测试和 macOS 打包命令：
+
+~~~bash
+./packaging/sync-from-voice.sh
+~~~
+
+默认读取相邻的 ../voice，也可以指定来源：
+
+~~~bash
+VOICE_REPO=/path/to/voice ./packaging/sync-from-voice.sh
+~~~
+
+脚本会阻止尚未移植的运行时代码变更，避免生成表面成功但不可运行的安装包；这类变更需要先把独立版适配层更新完，再在同一个改动中更新 packaging/voice-sync.lock。本地开发有未提交改动时可加 --allow-dirty，正式同步不建议使用。
+
 ## 构建安装包
 
 构建脚本在 `packaging/`：
