@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from .base import Emit, LocalAgent, RunControl, RunRequest, request_prompt
+from .base import Emit, LocalAgent, RunControl, RunRequest, executable_command, request_prompt
 
 
 READ_LIMIT = 64 * 1024 * 1024
@@ -48,14 +48,18 @@ def resolve_codex_binary(configured: str | None = None) -> str:
     The standalone ``codex`` executable and ChatGPT's bundled app-server can
     be different versions.  Desktop follow-ups use ``thread/queue/add``, which
     older standalone binaries do not understand.  An explicit environment
-    override remains available for custom installations and tests.
+    override and a user-selected file path remain available for custom
+    installations and tests.
     """
     explicit = str(os.environ.get("XIAOBAI_CODEX_BIN") or "").strip()
     if explicit:
         return explicit
+    configured_value = str(configured or "").strip()
+    configured_path = Path(configured_value).expanduser()
+    if configured_value and configured_path.is_file():
+        return configured_value
     if CHATGPT_CODEX_BINARY.is_file() and os.access(CHATGPT_CODEX_BINARY, os.X_OK):
         return str(CHATGPT_CODEX_BINARY)
-    configured_value = str(configured or "").strip()
     if configured_value and (
             Path(configured_value).expanduser().is_file()
             or shutil.which(configured_value)):
@@ -98,7 +102,8 @@ class CodexAdapter:
         model = str(session.get("model") or self.definition.get("model") or "")
         effort = str(session.get("reasoning_effort") or self.definition.get("reasoning_effort") or "")
         proc = await asyncio.create_subprocess_exec(
-            self.binary, "app-server", "--stdio", stdin=asyncio.subprocess.PIPE,
+            *executable_command(self.binary, "app-server", "--stdio"),
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True, limit=READ_LIMIT)
         next_id = 1
@@ -322,7 +327,8 @@ class CodexAdapter:
             raise CodexQueueError("Codex 会话 ID 为空")
 
         proc = await asyncio.create_subprocess_exec(
-            self.binary, "app-server", "--stdio", stdin=asyncio.subprocess.PIPE,
+            *executable_command(self.binary, "app-server", "--stdio"),
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True, limit=READ_LIMIT)
         request_id = 1

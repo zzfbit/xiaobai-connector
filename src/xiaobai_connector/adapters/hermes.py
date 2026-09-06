@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .base import Emit, LocalAgent, RunControl, RunRequest, request_prompt
+from .base import Emit, LocalAgent, RunControl, RunRequest, executable_command, request_prompt
 
 
 class HermesAdapter:
@@ -47,13 +47,17 @@ class HermesAdapter:
         workdir.mkdir(parents=True, exist_ok=True)
         configured = self.definition.get("command")
         if isinstance(configured, list) and configured:
-            command = [str(item).replace("{prompt}", request_prompt(request)) for item in configured]
+            configured_command = [
+                str(item).replace("{prompt}", request_prompt(request))
+                for item in configured
+            ]
+            command = executable_command(*configured_command)
             stdin_prompt = None
         else:
             # Hermes' supported automation mode prints only the final answer
             # and is safe to invoke without a terminal.  The output is still
             # streamed line-by-line to the phone as it becomes available.
-            command = [self.binary, "-z", request_prompt(request)]
+            command = executable_command(self.binary, "-z", request_prompt(request))
             stdin_prompt = None
         proc = await asyncio.create_subprocess_exec(
             *command, cwd=str(workdir), stdin=asyncio.subprocess.PIPE,

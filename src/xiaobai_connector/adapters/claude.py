@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .base import Emit, LocalAgent, RunControl, RunRequest, request_prompt
+from .base import Emit, LocalAgent, RunControl, RunRequest, executable_command, request_prompt
 
 
 class ClaudeAdapter:
@@ -35,8 +35,9 @@ class ClaudeAdapter:
             raise RuntimeError("没有找到 Claude Code 命令，请重新扫描本机 Agent")
         workdir = Path(str(self.definition.get("workdir") or Path.home())).expanduser().resolve()
         workdir.mkdir(parents=True, exist_ok=True)
-        command = [self.binary, "--print", "--input-format", "stream-json",
-                   "--output-format", "stream-json", "--verbose"]
+        command = executable_command(
+            self.binary, "--print", "--input-format", "stream-json",
+            "--output-format", "stream-json", "--verbose")
         model = str(self.definition.get("model") or "").strip()
         if model:
             command.extend(["--model", model])

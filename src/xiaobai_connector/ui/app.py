@@ -20,7 +20,7 @@ from pathlib import Path
 from xiaobai_connector import __version__
 from xiaobai_connector.config import ConnectorConfig, VALID_SANDBOXES
 from xiaobai_connector.credentials import CredentialStore, SERVICE
-from xiaobai_connector.discovery import scan_agents
+from xiaobai_connector.discovery import AGENT_DISPLAY_NAMES, resolve_executable, scan_agents
 from xiaobai_connector.pairing import PairingClient, PairingError, PairingPending, PairingRequest
 from xiaobai_connector.paths import ensure_data_dir, log_path
 from xiaobai_connector.runtime import ConnectorRuntime
@@ -83,11 +83,16 @@ class ConnectorApp(tk.Tk):
 
     def show_scan(self) -> None:
         self._clear()
-        self._heading("1. 选择要连接的 Agent", "程序只检查常见的本地安装位置，不会上传本机文件。")
+        self._heading(
+            "1. 选择要连接的 Agent",
+            "程序会检查常见的本地安装位置；如果没有找到，可以手动选择 Agent 的 .exe、.cmd 或可执行文件。",
+        )
         top = ttk.Frame(self.body)
         top.pack(fill="x")
         self.scan_status = ttk.Label(top, text="正在扫描…", style="Small.TLabel")
         self.scan_status.pack(side="left")
+        ttk.Button(top, text="手动添加路径…", command=self._choose_agent_path).pack(
+            side="right", padx=(8, 0))
         ttk.Button(top, text="重新扫描", command=self._scan_async).pack(side="right")
         self.agent_frame = ttk.Frame(self.body)
         self.agent_frame.pack(fill="both", expand=True, pady=(12, 8))
@@ -108,7 +113,7 @@ class ConnectorApp(tk.Tk):
 
     def _scan_worker(self) -> None:
         try:
-            result = scan_agents()
+            result = scan_agents(self.config_value.agents)
             self._scan_queue.put(("ok", result))
         except Exception as exc:
             self._scan_queue.put(("error", str(exc)))
@@ -138,7 +143,14 @@ class ConnectorApp(tk.Tk):
                                        state="normal" if candidate.can_connect else "disabled")
             checkbox.pack(side="left")
             state = "可连接" if candidate.status == "online" else "已配置" if candidate.status == "configured" else "未找到"
-            ttk.Label(row, text=state, style="Small.TLabel").pack(side="right")
+            actions = ttk.Frame(row)
+            actions.pack(side="right")
+            ttk.Label(actions, text=state, style="Small.TLabel").pack(side="left")
+            ttk.Button(
+                actions,
+                text="更换路径…" if candidate.can_connect else "选择路径…",
+                command=lambda kind=candidate.kind: self._choose_agent_path(kind),
+            ).pack(side="left", padx=(10, 0))
             detail = candidate.detail
             if candidate.version:
                 detail += f" · {candidate.version}"
@@ -152,6 +164,110 @@ class ConnectorApp(tk.Tk):
     def _selected_candidates(self) -> list[Any]:
         return [candidate for candidate, variable in zip(self.candidates, self.check_vars)
                 if variable.get() and candidate.can_connect]
+
+    def _choose_agent_path(self, kind: str | None = None) -> None:
+        """Open a small form for selecting or pasting a local Agent path."""
+        dialog = tk.Toplevel(self)
+        dialog.title("添加 Agent 路径")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        content = ttk.Frame(dialog, padding=18)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="Agent 类型").grid(row=0, column=0, sticky="w", pady=6)
+
+        kind_values = [AGENT_DISPLAY_NAMES[item] for item in AGENT_DISPLAY_NAMES]
+        initial_kind = kind if kind in AGENT_DISPLAY_NAMES else "codex"
+        kind_var = tk.StringVar(value=AGENT_DISPLAY_NAMES[initial_kind])
+        kind_combo = ttk.Combobox(
+            content, textvariable=kind_var, values=kind_values, state="readonly", width=28)
+        kind_combo.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(14, 0), pady=6)
+
+        ttk.Label(content, text="程序路径").grid(row=1, column=0, sticky="w", pady=6)
+        path_var = tk.StringVar()
+        path_entry = ttk.Entry(content, textvariable=path_var, width=48)
+        path_entry.grid(row=1, column=1, sticky="ew", padx=(14, 8), pady=6)
+
+        def browse() -> None:
+            value = filedialog.askopenfilename(
+                parent=dialog,
+                title="选择 Agent 程序",
+                filetypes=[
+                    ("Agent 程序", "*.exe *.cmd *.bat *.com"),
+                    ("所有文件", "*.*"),
+                ],
+            )
+            if value:
+                path_var.set(value)
+
+        ttk.Button(content, text="浏览…", command=browse).grid(
+            row=1, column=2, sticky="e", pady=6)
+        ttk.Label(
+            content,
+            text="Windows 可选择 .exe、.cmd 或 .bat；也可以直接粘贴完整路径。",
+            style="Small.TLabel",
+            wraplength=460,
+        ).grid(row=2, column=1, columnspan=2, sticky="w", padx=(14, 0), pady=(0, 8))
+        error = ttk.Label(content, text="", foreground="#b42318", wraplength=460)
+        error.grid(row=3, column=1, columnspan=2, sticky="w", padx=(14, 0), pady=(0, 4))
+
+        buttons = ttk.Frame(content)
+        buttons.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="left")
+
+        def add_path() -> None:
+            selected_kind = next(
+                (item for item, label in AGENT_DISPLAY_NAMES.items() if label == kind_var.get()),
+                "",
+            )
+            executable = resolve_executable(path_var.get())
+            if not selected_kind:
+                error.configure(text="请选择 Agent 类型。")
+                return
+            if not executable:
+                error.configure(text="路径不存在或不可执行，请选择 Agent 的实际程序文件。")
+                return
+            self._remember_agent_path(selected_kind, executable)
+            dialog.destroy()
+            self._scan_async()
+
+        ttk.Button(buttons, text="添加并重新扫描", style="Primary.TButton",
+                   command=add_path).pack(side="right")
+        content.columnconfigure(1, weight=1)
+        path_entry.focus_set()
+        self.wait_window(dialog)
+
+    def _remember_agent_path(self, kind: str, executable: str) -> None:
+        definitions = [dict(item) for item in self.config_value.agents]
+        updated = False
+        for definition in definitions:
+            if str(definition.get("adapter") or "").strip().lower() != kind:
+                continue
+            definition.update({
+                "adapter": kind,
+                "display_name": AGENT_DISPLAY_NAMES[kind],
+                "mention_handle": kind,
+                "binary": executable,
+                "local_ref": str(definition.get("local_ref") or f"{kind}:default"),
+                "enabled": False,
+            })
+            updated = True
+            break
+        if not updated:
+            definitions.append({
+                "local_ref": f"{kind}:default",
+                "adapter": kind,
+                "display_name": AGENT_DISPLAY_NAMES[kind],
+                "mention_handle": kind,
+                "binary": executable,
+                "enabled": False,
+            })
+        self.config_value.agents = definitions
+        try:
+            self.config_value.save()
+        except (OSError, ValueError) as exc:
+            self.scan_status.configure(text=f"路径已添加，但保存失败：{exc}")
 
     def _to_scope(self) -> None:
         if not self._selected_candidates():

@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
+from pathlib import Path
 from typing import Any
 
 from ..models import Emit, ExecutionAdapter, LocalAgent, RunControl, RunRequest, attachment_text
+
+
+def executable_command(binary: str, *args: str) -> list[str]:
+    """Build a subprocess command for executables and Windows command files."""
+    if platform.system() == "Windows" and Path(binary).suffix.lower() in {".cmd", ".bat"}:
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", binary, *args]
+    return [binary, *args]
 
 
 def group_prompt(request: RunRequest) -> str:
@@ -27,5 +37,5 @@ def request_prompt(request: RunRequest) -> str:
 
 __all__ = [
     "Emit", "ExecutionAdapter", "LocalAgent", "RunControl", "RunRequest",
-    "request_prompt", "group_prompt",
+    "request_prompt", "group_prompt", "executable_command",
 ]
