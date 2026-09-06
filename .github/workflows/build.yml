@@ -5,6 +5,9 @@ on:
   push:
     tags: ["v*.*.*"]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -23,12 +26,71 @@ jobs:
       - name: Build macOS
         if: runner.os == 'macOS'
         run: ./packaging/build-macos.sh
+      - name: Prepare macOS release assets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          package_version="${GITHUB_REF_NAME//[^a-zA-Z0-9._-]/-}"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/Xiaobai Connector.app" \
+            "dist/Xiaobai-Connector-${package_version}-macos.app.zip"
+          mv "dist/Xiaobai-Connector-macos.dmg" \
+            "dist/Xiaobai-Connector-${package_version}-macos.dmg"
       - name: Build Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./packaging/build-windows.ps1
+      - name: Prepare Windows release assets
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $PackageVersion = [regex]::Replace($env:GITHUB_REF_NAME, '[^a-zA-Z0-9._-]', '-')
+          $Executable = "dist\Xiaobai Connector.exe"
+          $VersionedExecutable = "dist\Xiaobai-Connector-$PackageVersion-windows.exe"
+          $VersionedArchive = "dist\Xiaobai-Connector-$PackageVersion-windows.zip"
+          Copy-Item $Executable $VersionedExecutable
+          Compress-Archive -Path $VersionedExecutable -DestinationPath $VersionedArchive -Force
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/
+          path: |
+            dist/*-macos.dmg
+            dist/*-macos.app.zip
+            dist/*-windows.exe
+            dist/*-windows.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: xiaobai-connector-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release-assets/*)
+          if ((${#assets[@]} == 0)); then
+            echo "没有找到构建产物" >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Xiaobai Connector $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
