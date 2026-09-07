@@ -1,20 +1,16 @@
-# Xiaobai Connector
+# Connector
 
-小白 Connector 是一个独立的桌面程序：安装到另一台 Mac 或 Windows 电脑后，自动寻找本机的 Codex、Claude Code、Hermes，用户勾选要开放给手机的 Agent，再用手机里的「设置 → 添加电脑」完成一次性配对。
+安装到 Mac 或 Windows 后，自动寻找本机的Agent，包括 Codex、Claude Code、Hermes等，勾选要连接到手机的 Agent，再用配对码完成和手机的配对。
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/zzfbit/xiaobai-connector/releases/latest) 下载最新版本：macOS 提供 DMG 和 App 压缩包，Windows 提供 EXE 和 ZIP。Release 由 GitHub Actions 在版本 tag 上自动构建。
+从 [GitHub Releases](https://github.com/zzfbit/xiaobai-connector/releases/latest) 下载最新版本。
 
 ## 使用流程
 
-1. 下载并打开 `Xiaobai Connector`。
-2. 点击「扫描本机 Agent」，勾选要连接的 Agent。
-   如果 Windows 没有扫描到 Agent，点击「手动添加路径…」，粘贴或选择对应的 `.exe`、`.cmd` 或 `.bat` 文件，然后重新扫描。
-3. 选择本机工作目录和安全策略。
-4. 程序显示 `pairing ID` 和 6 位配对码。
-5. 在小白 App 的「设置 → 添加电脑」输入这两项。
-6. 手机确认后，桌面程序自动交换长期凭据并保持连接；Agent 会出现在手机名录里。
+1. 下载并打开 `Xiaobai Connector`，自动「扫描本机 Agent」，勾选要连接的 Agent。
+2. 程序显示 `pairing ID` 和 6 位配对码，在 App 的「设置 → 添加电脑」输入这两项。
+3. 电脑端的Agent 会出现在手机列表里。
 
 长期 Connector token 只保存在 macOS Keychain 或 Windows Credential Manager，不写入配置文件、日志或 Git 仓库。服务器只接收 Agent 的声明和必要的消息内容；本机 Agent 的账号、密钥和完整环境不会上传。
 
