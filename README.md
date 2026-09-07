@@ -1,4 +1,4 @@
-# Xiaobai Connector
+# Connector
 
 安装到 Mac 或 Windows 后，自动寻找本机的Agent，包括 Codex、Claude Code、Hermes等，勾选要连接到手机的 Agent，再用配对码完成和手机的配对。
 
