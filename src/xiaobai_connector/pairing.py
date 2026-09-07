@@ -9,6 +9,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from . import __version__
+
 
 class PairingError(RuntimeError):
     pass
@@ -16,6 +18,9 @@ class PairingError(RuntimeError):
 
 class PairingPending(PairingError):
     pass
+
+
+PAIRING_USER_AGENT = f"Xiaobai-Connector/{__version__}"
 
 
 @dataclass(frozen=True)
@@ -43,7 +48,13 @@ class PairingClient:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path, data=body, method="POST",
-            headers={"Content-Type": "application/json", "Accept": "application/json"})
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                # urllib otherwise sends Python-urllib/<version>. Cloudflare
+                # rejects that default signature on the production API.
+                "User-Agent": PAIRING_USER_AGENT,
+            })
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read(2 * 1024 * 1024)
