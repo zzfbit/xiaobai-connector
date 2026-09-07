@@ -32,6 +32,18 @@ class AgentIdentityTests(unittest.TestCase):
         self.assertEqual(agent.avatar["fallback"], "🪽")
         self.assertTrue(agent.presentation["show_avatars"])
 
+    def test_hermes_visibility_is_independent_of_live_availability(self):
+        adapter = HermesAdapter({
+            "binary": "/path/that/does/not/exist/hermes",
+            "enabled": True,
+        })
+
+        with patch.object(adapter, "_profile_dirs", return_value=[]):
+            agent = adapter.discover()[0]
+
+        self.assertEqual(agent.status, "offline")
+        self.assertTrue(agent.enabled)
+
     def test_codex_status_does_not_downgrade_an_available_binary(self):
         adapter = CodexAdapter({"binary": sys.executable, "enabled": True})
         with patch.object(CodexSessionClient, "status", return_value={

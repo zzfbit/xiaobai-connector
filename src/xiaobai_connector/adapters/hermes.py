@@ -134,7 +134,11 @@ class HermesAdapter:
             mention_handle=str(self.definition.get("mention_handle") or "hermes"),
             capabilities=tuple(self.definition.get("capabilities") or ("chat", "stream")),
             status=status,
-            enabled=bool(self.definition.get("enabled", available)) and available,
+            # Visibility is an administrative setting, not a live executable
+            # probe. Hermes may start after Connector on login/reboot; keep a
+            # configured Agent in the roster while status_snapshots reports
+            # its current availability separately.
+            enabled=bool(self.definition.get("enabled", True)),
             avatar=clone(self.definition.get("avatar")
                          if isinstance(self.definition.get("avatar"), dict)
                          else hermes_avatar()),
