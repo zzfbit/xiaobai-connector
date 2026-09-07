@@ -17,7 +17,8 @@ dependencies = [
 dev = ["pytest>=8,<9", "pyinstaller>=6,<7"]
 
 [project.scripts]
-xiaobai-connector = "xiaobai_connector.ui.app:main"
+xiaobai-connector-macos = "xiaobai_connector.ui.app:main"
+xiaobai-connector-windows = "xiaobai_connector_windows.ui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

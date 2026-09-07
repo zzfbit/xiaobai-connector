@@ -13,7 +13,7 @@ else
 fi
 cd "$project_dir"
 "$python_bin" -m pip install -e '.[dev]'
-"$python_bin" -m PyInstaller --noconfirm --clean packaging/xiaobai-connector.spec
+"$python_bin" -m PyInstaller --noconfirm --clean packaging/xiaobai-connector-macos.spec
 if command -v hdiutil >/dev/null 2>&1; then
   hdiutil create -volname "Xiaobai Connector" -srcfolder "dist/Xiaobai Connector.app" \
     -ov -format UDZO "dist/Xiaobai-Connector-macos.dmg" >/dev/null

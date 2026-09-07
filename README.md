@@ -23,16 +23,42 @@
 需要 Python 3.11 或更新版本。Tkinter 是桌面界面依赖，Windows 的官方 Python 安装包和 macOS 的 Python.org 安装包通常自带它。
 
 ```bash
+# macOS
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m xiaobai_connector
 ```
 
+```powershell
+# Windows PowerShell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m xiaobai_connector_windows
+```
+
 也可以直接运行：
 
 ```bash
-.venv/bin/xiaobai-connector
+# macOS
+.venv/bin/xiaobai-connector-macos
+# Windows PowerShell
+.venv\Scripts\xiaobai-connector-windows.exe
 ```
+
+代码按平台分开维护：`src/xiaobai_connector` 是 macOS 端，
+`src/xiaobai_connector_windows` 是 Windows 端独立副本。Windows 构建只分析
+`xiaobai_connector_windows`，macOS 构建只分析 `xiaobai_connector`；修改一端时不应
+改动另一端的专属代码。
+
+Windows 端保留了 macOS 端的 Codex 桌面桥接：检测到 Windows ChatGPT/Codex 桌面端的
+`codex-app-tools` 命名管道时，手机消息先复用桌面端现有会话 writer，并保留
+`send_message_to_thread` 的可见插话行为；桌面端未运行或桥接不可用时，自动回退到
+`thread/queue/add` 持久队列。桥接只读取桌面端 app-server 子进程的本地启动参数，不会
+把 macOS 路径或 macOS Keychain 代码带进 Windows 包。
+
+Windows 端会优先使用 ChatGPT/Codex 桌面端随附的 `codex.exe`，而不是 PATH 中可能过期的
+`codex.cmd`。历史通过本机 app-server 和 `%USERPROFILE%\.codex` 只读读取；JSON-RPC 固定按
+UTF-8 解码，避免中文 Windows 的 GBK 系统编码导致会话历史为空。
 
 开发环境中可用 `XIAOBAI_CONNECTOR_SERVER_URL` 覆盖默认服务器地址。配对服务使用同一地址的 HTTP 入口（例如 `wss://api.xiaobaizzf.com/agent/connect` 对应 `https://api.xiaobaizzf.com`）。
 
@@ -62,7 +88,11 @@ VOICE_REPO=/path/to/voice ./packaging/sync-from-voice.sh
 ./packaging/build-windows.ps1
 ```
 
-仓库提供 macOS 和 Windows 的构建脚本；Windows 需要在 Windows 电脑或 CI runner 上运行，PyInstaller 不能从 macOS 直接生成可用的 Windows 安装包。签名、公证和 Windows 代码签名需要在发布时补充各平台的证书，不把证书或 token 放进仓库。
+两个构建脚本使用各自的 PyInstaller spec：macOS 使用
+`packaging/xiaobai-connector-macos.spec`，Windows 使用
+`packaging/xiaobai-connector-windows.spec`。Windows 需要在 Windows 电脑或 CI runner
+上运行，PyInstaller 不能从 macOS 直接生成可用的 Windows 安装包。签名、公证和
+Windows 代码签名需要在发布时补充各平台的证书，不把证书或 token 放进仓库。
 
 ## 安全边界
 
