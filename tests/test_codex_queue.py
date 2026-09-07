@@ -5,7 +5,11 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from xiaobai_connector.adapters.codex import CodexAdapter, resolve_codex_binary
+from xiaobai_connector.adapters.codex import (
+    CodexAdapter,
+    CodexQueueError,
+    resolve_codex_binary,
+)
 
 
 class _FakeWriter:
@@ -69,6 +73,19 @@ class CodexQueueTests(unittest.TestCase):
         self.assertEqual(queue_request["params"]["threadId"], "thread_1")
         self.assertEqual(queue_request["params"]["clientUserMessageId"], "a" * 32)
         self.assertEqual(queue_request["params"]["input"][0]["text"], "继续处理")
+
+    def test_queue_process_failure_is_a_retryable_connector_error(self):
+        async def fake_create(*_args, **_kwargs):
+            raise OSError("Codex 正在重启")
+
+        with patch.dict(os.environ, {"XIAOBAI_CODEX_BIN": sys.executable}):
+            adapter = CodexAdapter({"local_ref": "codex:default", "enabled": True})
+            with patch("xiaobai_connector.adapters.codex.asyncio.create_subprocess_exec",
+                       new=fake_create):
+                with self.assertRaises(CodexQueueError):
+                    asyncio.run(adapter.queue_thread_message(
+                        thread_id="thread_1", text="继续处理",
+                        client_message_id="b" * 32))
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ from .hermes import HermesAdapter
 class AdapterRouter:
     def __init__(self, definitions: list[dict[str, Any]]):
         self._adapters: dict[str, ExecutionAdapter] = {}
+        self._adapter_order: list[ExecutionAdapter] = []
+        refs: set[str] = set()
         for definition in definitions:
             if not bool(definition.get("enabled")):
                 continue
@@ -27,12 +29,38 @@ class AdapterRouter:
                 continue
             local_ref = str(definition.get("local_ref") or "").strip()
             if local_ref:
+                if local_ref in refs:
+                    raise ValueError("同一 Connector 的 local_ref 不能重复")
                 self._adapters[local_ref] = adapter
+                self._adapter_order.append(adapter)
+                refs.add(local_ref)
 
     def discover(self) -> list[LocalAgent]:
         result: list[LocalAgent] = []
         for local_ref, adapter in self._adapters.items():
             result.extend(adapter.discover())
+        return result
+
+    def history_snapshots(self) -> list[dict[str, Any]]:
+        """Collect optional durable-history projections from local adapters."""
+        result: list[dict[str, Any]] = []
+        for adapter in self._adapter_order:
+            reader = getattr(adapter, "history_snapshots", None)
+            if callable(reader):
+                values = reader()
+                if values:
+                    result.extend(item for item in values if isinstance(item, dict))
+        return result
+
+    def status_snapshots(self) -> list[dict[str, Any]]:
+        """Collect optional live-work projections from local adapters."""
+        result: list[dict[str, Any]] = []
+        for adapter in self._adapter_order:
+            reader = getattr(adapter, "status_snapshots", None)
+            if callable(reader):
+                values = reader()
+                if values:
+                    result.extend(item for item in values if isinstance(item, dict))
         return result
 
     def adapter_for(self, local_ref: str) -> ExecutionAdapter:

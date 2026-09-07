@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as _datetime
 import platform
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -26,13 +27,27 @@ from xiaobai_connector.paths import ensure_data_dir, log_path
 from xiaobai_connector.runtime import ConnectorRuntime
 
 
+COLORS = {
+    "canvas": "#f4f4f4",
+    "white": "#ffffff",
+    "ink": "#111111",
+    "muted": "#686868",
+    "quiet": "#8a8a8a",
+    "line": "#d6d6d6",
+    "soft": "#ededed",
+    "disabled": "#a7a7a7",
+}
+
+
 class ConnectorApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("小白 Connector")
-        self.geometry("760x620")
-        self.minsize(680, 520)
-        self.configure(bg="#f6f7fb")
+        self.geometry("760x640")
+        self.minsize(680, 560)
+        self.configure(bg=COLORS["canvas"])
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
         self.config_value = ConnectorConfig.load()
         self.candidates: list[Any] = []
         self.check_vars: list[tk.BooleanVar] = []
@@ -44,8 +59,15 @@ class ConnectorApp(tk.Tk):
         self.report_callback_exception = self._report_callback_exception
         self._build_style()
         self._build_header()
-        self.body = ttk.Frame(self, padding=(34, 18, 34, 24))
-        self.body.pack(fill="both", expand=True)
+        self.body = ttk.Frame(self, style="App.TFrame", padding=(34, 16, 34, 14))
+        self.body.grid(row=1, column=0, sticky="nsew")
+        self.body.columnconfigure(0, weight=1)
+        self.body.rowconfigure(0, weight=1)
+        self.page = ttk.Frame(self.body, style="App.TFrame")
+        self.page.grid(row=0, column=0, sticky="nsew")
+        ttk.Separator(self, orient="horizontal").grid(
+            row=2, column=0, sticky="ew")
+        self._build_navigation()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.show_scan()
         self.after(150, self._auto_connect_if_configured)
@@ -56,51 +78,138 @@ class ConnectorApp(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("Title.TLabel", font=("Arial", 24, "bold"), foreground="#172033")
-        style.configure("Sub.TLabel", font=("Arial", 11), foreground="#64708a")
-        style.configure("Card.TFrame", background="#ffffff", relief="solid", borderwidth=1)
-        style.configure("Primary.TButton", font=("Arial", 11, "bold"), padding=(16, 9))
-        style.configure("TButton", padding=(12, 7))
-        style.configure("TCheckbutton", background="#ffffff", font=("Arial", 11))
-        style.configure("Small.TLabel", font=("Arial", 9), foreground="#71809a")
+        style.configure("TFrame", background=COLORS["canvas"])
+        style.configure("App.TFrame", background=COLORS["canvas"])
+        style.configure("Navigation.TFrame", background=COLORS["canvas"])
+        style.configure("Card.TFrame", background=COLORS["white"],
+                        relief="solid", borderwidth=1)
+        style.configure("CardInner.TFrame", background=COLORS["white"])
+
+        style.configure("TLabel", background=COLORS["canvas"], foreground=COLORS["ink"])
+        style.configure("Title.TLabel", background=COLORS["canvas"],
+                        font=("Arial", 24, "bold"), foreground=COLORS["ink"])
+        style.configure("Heading.TLabel", background=COLORS["canvas"],
+                        font=("Arial", 18, "bold"), foreground=COLORS["ink"])
+        style.configure("Sub.TLabel", background=COLORS["canvas"],
+                        font=("Arial", 11), foreground=COLORS["muted"])
+        style.configure("Small.TLabel", background=COLORS["canvas"],
+                        font=("Arial", 9), foreground=COLORS["quiet"])
+        style.configure("Meta.TLabel", background=COLORS["canvas"],
+                        font=("Arial", 9, "bold"), foreground=COLORS["quiet"])
+        style.configure("CardLabel.TLabel", background=COLORS["white"],
+                        foreground=COLORS["ink"])
+        style.configure("CardMeta.TLabel", background=COLORS["white"],
+                        font=("Arial", 9), foreground=COLORS["quiet"])
+        style.configure("CardDetail.TLabel", background=COLORS["white"],
+                        font=("Arial", 9), foreground=COLORS["muted"])
+        style.configure("PairingId.TLabel", background=COLORS["white"],
+                        font=("Courier", 18, "bold"), foreground=COLORS["ink"])
+        style.configure("PairingCode.TLabel", background=COLORS["white"],
+                        font=("Courier", 32, "bold"), foreground=COLORS["ink"])
+        style.configure("Error.TLabel", background=COLORS["canvas"],
+                        font=("Arial", 9), foreground=COLORS["ink"])
+
+        style.configure("TButton", background=COLORS["white"], foreground=COLORS["ink"],
+                        bordercolor=COLORS["line"], lightcolor=COLORS["white"],
+                        darkcolor=COLORS["line"], relief="solid", borderwidth=1,
+                        padding=(14, 8), font=("Arial", 10))
+        style.map(
+            "TButton",
+            background=[("disabled", COLORS["soft"]), ("pressed", COLORS["soft"]),
+                        ("active", COLORS["soft"])],
+            foreground=[("disabled", COLORS["disabled"])],
+            bordercolor=[("focus", COLORS["ink"])],
+        )
+        style.configure("Primary.TButton", background=COLORS["ink"],
+                        foreground=COLORS["white"], bordercolor=COLORS["ink"],
+                        lightcolor=COLORS["ink"], darkcolor=COLORS["ink"],
+                        relief="solid", borderwidth=1, padding=(18, 9),
+                        font=("Arial", 10, "bold"))
+        style.map(
+            "Primary.TButton",
+            background=[("disabled", COLORS["disabled"]), ("pressed", "#000000"),
+                        ("active", "#303030")],
+            foreground=[("disabled", COLORS["white"])],
+            bordercolor=[("focus", COLORS["ink"])],
+        )
+
+        style.configure("TCheckbutton", background=COLORS["canvas"],
+                        foreground=COLORS["ink"], font=("Arial", 10))
+        style.configure("Card.TCheckbutton", background=COLORS["white"],
+                        foreground=COLORS["ink"], font=("Arial", 11))
+        style.map("Card.TCheckbutton", background=[("active", COLORS["white"]),
+                                                     ("disabled", COLORS["white"])],
+                  foreground=[("disabled", COLORS["disabled"])])
+
+        style.configure("TEntry", fieldbackground=COLORS["white"],
+                        foreground=COLORS["ink"], bordercolor=COLORS["line"],
+                        lightcolor=COLORS["line"], darkcolor=COLORS["line"],
+                        padding=(8, 7))
+        style.map("TEntry", bordercolor=[("focus", COLORS["ink"])],
+                  lightcolor=[("focus", COLORS["ink"])],
+                  darkcolor=[("focus", COLORS["ink"])])
+        style.configure("TCombobox", fieldbackground=COLORS["white"],
+                        background=COLORS["white"], foreground=COLORS["ink"],
+                        bordercolor=COLORS["line"], lightcolor=COLORS["line"],
+                        darkcolor=COLORS["line"], padding=(8, 6))
+        style.map("TCombobox", fieldbackground=[("readonly", COLORS["white"])],
+                  foreground=[("readonly", COLORS["ink"])],
+                  bordercolor=[("focus", COLORS["ink"])])
 
     def _build_header(self) -> None:
-        header = ttk.Frame(self, padding=(34, 24, 34, 4))
-        header.pack(fill="x")
-        ttk.Label(header, text="小白 Connector", style="Title.TLabel").pack(anchor="w")
+        header = ttk.Frame(self, style="App.TFrame", padding=(34, 24, 34, 10))
+        header.grid(row=0, column=0, sticky="ew")
+        title_row = ttk.Frame(header, style="App.TFrame")
+        title_row.pack(fill="x")
+        ttk.Label(title_row, text="小白 Connector", style="Title.TLabel").pack(side="left")
+        ttk.Label(title_row, text=f"v{__version__}", style="Meta.TLabel").pack(
+            side="right", pady=(10, 0))
         self.header_subtitle = ttk.Label(
             header, text="把这台电脑里的 Agent 安全连接到手机", style="Sub.TLabel")
         self.header_subtitle.pack(anchor="w", pady=(4, 0))
 
+    def _build_navigation(self) -> None:
+        navigation = ttk.Frame(self, style="Navigation.TFrame", padding=(34, 12, 34, 18))
+        navigation.grid(row=3, column=0, sticky="ew")
+        navigation.columnconfigure(0, weight=1)
+        self.nav_back = ttk.Button(navigation, text="")
+        self.nav_back.grid(row=0, column=0, sticky="w")
+        self.nav_next = ttk.Button(navigation, text="", style="Primary.TButton")
+        self.nav_next.grid(row=0, column=1, sticky="e")
+        self.nav_back.grid_remove()
+        self.nav_next.grid_remove()
+
     def _clear(self) -> None:
-        for child in self.body.winfo_children():
+        for child in self.page.winfo_children():
             child.destroy()
 
     def _heading(self, title: str, subtitle: str) -> None:
-        ttk.Label(self.body, text=title, font=("Arial", 18, "bold")).pack(anchor="w")
-        ttk.Label(self.body, text=subtitle, style="Sub.TLabel", wraplength=660).pack(
+        ttk.Label(self.page, text=title, style="Heading.TLabel").pack(anchor="w")
+        ttk.Label(self.page, text=subtitle, style="Sub.TLabel", wraplength=660).pack(
             anchor="w", pady=(5, 18))
 
     def show_scan(self) -> None:
         self._clear()
+        self._bottom_buttons(None, None, next_text="")
         self._heading(
             "1. 选择要连接的 Agent",
             "程序会检查常见的本地安装位置；如果没有找到，可以手动选择 Agent 的 .exe、.cmd 或可执行文件。",
         )
-        top = ttk.Frame(self.body)
+        top = ttk.Frame(self.page, style="App.TFrame")
         top.pack(fill="x")
         self.scan_status = ttk.Label(top, text="正在扫描…", style="Small.TLabel")
         self.scan_status.pack(side="left")
         ttk.Button(top, text="手动添加路径…", command=self._choose_agent_path).pack(
             side="right", padx=(8, 0))
         ttk.Button(top, text="重新扫描", command=self._scan_async).pack(side="right")
-        self.agent_frame = ttk.Frame(self.body)
+        self.agent_frame = ttk.Frame(self.page, style="App.TFrame")
         self.agent_frame.pack(fill="both", expand=True, pady=(12, 8))
         self.scan_status_value = "正在扫描…"
         self._scan_async()
 
     def _scan_async(self) -> None:
         self.scan_status.configure(text="正在扫描本机 Agent…")
+        self._bottom_buttons(None, None, next_text="")
         for child in self.agent_frame.winfo_children():
             child.destroy()
         while True:
@@ -135,17 +244,19 @@ class ConnectorApp(tk.Tk):
         for candidate in candidates:
             card = ttk.Frame(self.agent_frame, style="Card.TFrame", padding=14)
             card.pack(fill="x", pady=5)
-            row = ttk.Frame(card)
+            row = ttk.Frame(card, style="CardInner.TFrame")
             row.pack(fill="x")
             variable = tk.BooleanVar(value=bool(candidate.selected and candidate.can_connect))
             self.check_vars.append(variable)
-            checkbox = ttk.Checkbutton(row, text=candidate.display_name, variable=variable,
-                                       state="normal" if candidate.can_connect else "disabled")
+            checkbox = ttk.Checkbutton(
+                row, text=candidate.display_name, variable=variable,
+                style="Card.TCheckbutton",
+                state="normal" if candidate.can_connect else "disabled")
             checkbox.pack(side="left")
             state = "可连接" if candidate.status == "online" else "已配置" if candidate.status == "configured" else "未找到"
-            actions = ttk.Frame(row)
+            actions = ttk.Frame(row, style="CardInner.TFrame")
             actions.pack(side="right")
-            ttk.Label(actions, text=state, style="Small.TLabel").pack(side="left")
+            ttk.Label(actions, text=state, style="CardMeta.TLabel").pack(side="left")
             ttk.Button(
                 actions,
                 text="更换路径…" if candidate.can_connect else "选择路径…",
@@ -156,7 +267,8 @@ class ConnectorApp(tk.Tk):
                 detail += f" · {candidate.version}"
             if candidate.executable:
                 detail += f"\n{candidate.executable}"
-            ttk.Label(card, text=detail, style="Small.TLabel", wraplength=610).pack(anchor="w", pady=(7, 0))
+            ttk.Label(card, text=detail, style="CardDetail.TLabel", wraplength=610).pack(
+                anchor="w", pady=(7, 0))
         found = sum(1 for item in candidates if item.found)
         self.scan_status.configure(text=f"扫描完成：发现 {found} 个 Agent")
         self._bottom_buttons(None, self._to_scope, next_text="下一步")
@@ -170,10 +282,13 @@ class ConnectorApp(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("添加 Agent 路径")
         dialog.transient(self)
-        dialog.resizable(False, False)
+        dialog.configure(bg=COLORS["canvas"])
+        dialog.geometry("640x250")
+        dialog.minsize(600, 250)
+        dialog.resizable(True, False)
         dialog.grab_set()
 
-        content = ttk.Frame(dialog, padding=18)
+        content = ttk.Frame(dialog, style="App.TFrame", padding=22)
         content.pack(fill="both", expand=True)
         ttk.Label(content, text="Agent 类型").grid(row=0, column=0, sticky="w", pady=6)
 
@@ -209,10 +324,10 @@ class ConnectorApp(tk.Tk):
             style="Small.TLabel",
             wraplength=460,
         ).grid(row=2, column=1, columnspan=2, sticky="w", padx=(14, 0), pady=(0, 8))
-        error = ttk.Label(content, text="", foreground="#b42318", wraplength=460)
+        error = ttk.Label(content, text="", style="Error.TLabel", wraplength=460)
         error.grid(row=3, column=1, columnspan=2, sticky="w", padx=(14, 0), pady=(0, 4))
 
-        buttons = ttk.Frame(content)
+        buttons = ttk.Frame(content, style="App.TFrame")
         buttons.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="left")
 
@@ -278,7 +393,7 @@ class ConnectorApp(tk.Tk):
     def show_scope(self) -> None:
         self._clear()
         self._heading("2. 设置这台电脑", "这些设置会保存在本机；配对完成后可以再次修改。")
-        form = ttk.Frame(self.body)
+        form = ttk.Frame(self.page, style="App.TFrame")
         form.pack(fill="x")
         ttk.Label(form, text="电脑名称").grid(row=0, column=0, sticky="w", pady=8)
         self.device_name_var = tk.StringVar(value=self.config_value.device_name or platform.node())
@@ -288,7 +403,7 @@ class ConnectorApp(tk.Tk):
             row=1, column=1, sticky="w", padx=(18, 0))
         ttk.Label(form, text="工作目录").grid(row=2, column=0, sticky="w", pady=8)
         self.workdir_var = tk.StringVar(value=self.config_value.workdir or str(Path.home()))
-        work_row = ttk.Frame(form)
+        work_row = ttk.Frame(form, style="App.TFrame")
         work_row.grid(row=2, column=1, sticky="ew", padx=(18, 0), pady=8)
         ttk.Entry(work_row, textvariable=self.workdir_var).pack(side="left", fill="x", expand=True)
         ttk.Button(work_row, text="选择…", command=self._choose_workdir).pack(side="left", padx=(8, 0))
@@ -308,12 +423,13 @@ class ConnectorApp(tk.Tk):
         value = self.sandbox_var.get()
         if value == "danger-full-access":
             self.warning.configure(text="高风险：Agent 可以读写本机全部文件。只有明确需要时才选择。",
-                                   foreground="#b42318")
+                                   foreground=COLORS["ink"])
         elif value == "read-only":
-            self.warning.configure(text="只读：适合查看和问答，Agent 不能修改文件。", foreground="#64708a")
+            self.warning.configure(text="只读：适合查看和问答，Agent 不能修改文件。",
+                                   foreground=COLORS["muted"])
         else:
             self.warning.configure(text="默认允许 Agent 修改所选工作目录，不允许越过目录操作。",
-                                   foreground="#64708a")
+                                   foreground=COLORS["muted"])
 
     def _choose_workdir(self) -> None:
         value = filedialog.askdirectory(parent=self, title="选择 Agent 工作目录")
@@ -339,24 +455,26 @@ class ConnectorApp(tk.Tk):
     def show_pairing(self) -> None:
         self._clear()
         self._heading("3. 用手机完成配对", "打开小白 App → 设置 → 添加电脑，输入下面的 pairing ID 和 6 位数字。")
-        card = ttk.Frame(self.body, style="Card.TFrame", padding=24)
+        card = ttk.Frame(self.page, style="Card.TFrame", padding=24)
         card.pack(fill="x", pady=(4, 16))
         self.pairing_id_var = tk.StringVar(value="正在生成…")
         self.short_code_var = tk.StringVar(value="------")
-        ttk.Label(card, text="pairing ID", style="Small.TLabel").pack(anchor="w")
-        ttk.Label(card, textvariable=self.pairing_id_var, font=("Courier", 18, "bold")).pack(anchor="w", pady=(3, 16))
-        ttk.Label(card, text="6 位配对码", style="Small.TLabel").pack(anchor="w")
-        ttk.Label(card, textvariable=self.short_code_var, font=("Courier", 32, "bold"), foreground="#315efb").pack(anchor="w", pady=(3, 8))
-        copy_row = ttk.Frame(card)
+        ttk.Label(card, text="pairing ID", style="CardMeta.TLabel").pack(anchor="w")
+        ttk.Label(card, textvariable=self.pairing_id_var, style="PairingId.TLabel").pack(
+            anchor="w", pady=(3, 16))
+        ttk.Label(card, text="6 位配对码", style="CardMeta.TLabel").pack(anchor="w")
+        ttk.Label(card, textvariable=self.short_code_var, style="PairingCode.TLabel").pack(
+            anchor="w", pady=(3, 8))
+        copy_row = ttk.Frame(card, style="CardInner.TFrame")
         copy_row.pack(anchor="w", pady=(3, 0))
         ttk.Button(copy_row, text="复制 pairing ID", command=lambda: self._copy(self.pairing_id_var.get())).pack(side="left")
         ttk.Button(copy_row, text="复制配对码", command=lambda: self._copy(self.short_code_var.get())).pack(side="left", padx=(8, 0))
-        self.pairing_status = ttk.Label(self.body, text="正在连接配对服务…", style="Sub.TLabel", wraplength=650)
+        self.pairing_status = ttk.Label(self.page, text="正在连接配对服务…", style="Sub.TLabel", wraplength=650)
         self.pairing_status.pack(anchor="w")
-        self.expiry_label = ttk.Label(self.body, text="", style="Small.TLabel")
+        self.expiry_label = ttk.Label(self.page, text="", style="Small.TLabel")
         self.expiry_label.pack(anchor="w", pady=(6, 0))
         self._polling = True
-        self._bottom_buttons(self.show_scope, None, next_text="", back_text="取消")
+        self._bottom_buttons(self._cancel_pairing, None, next_text="", back_text="取消")
         threading.Thread(target=self._pairing_worker, name="pairing", daemon=True).start()
 
     def _pairing_worker(self) -> None:
@@ -378,14 +496,20 @@ class ConnectorApp(tk.Tk):
                 return
         except (PairingError, OSError) as exc:
             error = str(exc)
-            self.after(0, lambda error=error: self.pairing_status.configure(
-                text=f"配对失败：{error}", foreground="#b42318"))
+            self.after(0, lambda error=error: self._show_pairing_error(error))
+
+    def _show_pairing_error(self, error: str) -> None:
+        if not hasattr(self, "pairing_status") or not self.pairing_status.winfo_exists():
+            return
+        self.pairing_status.configure(text=f"配对失败：{error}", foreground=COLORS["ink"])
 
     def _show_pairing(self, pairing: PairingRequest) -> None:
+        if not hasattr(self, "pairing_id_var") or not self.pairing_id_var.winfo_exists():
+            return
         self._polling = True
         self.pairing_id_var.set(pairing.pairing_id)
         self.short_code_var.set(pairing.short_code)
-        self.pairing_status.configure(text="等待手机确认…", foreground="#64708a")
+        self.pairing_status.configure(text="等待手机确认…", foreground=COLORS["muted"])
         self._update_expiry()
 
     def _update_expiry(self) -> None:
@@ -395,7 +519,8 @@ class ConnectorApp(tk.Tk):
         self.expiry_label.configure(text=f"配对码约 {remaining // 60}:{remaining % 60:02d} 后过期")
         if remaining <= 0:
             self._polling = False
-            self.pairing_status.configure(text="配对码已过期，请返回后重新生成。", foreground="#b42318")
+            self.pairing_status.configure(text="配对码已过期，请返回后重新生成。",
+                                           foreground=COLORS["ink"])
             return
         self.after(1000, self._update_expiry)
 
@@ -409,28 +534,28 @@ class ConnectorApp(tk.Tk):
             self.config_value.save()
             CredentialStore(SERVICE).set(result["device_id"], result["connector_token"])
         except Exception as exc:
-            self.pairing_status.configure(text=f"凭据保存失败：{exc}", foreground="#b42318")
+            self.pairing_status.configure(text=f"凭据保存失败：{exc}", foreground=COLORS["ink"])
             return
-        self.pairing_status.configure(text="手机已确认，正在启动连接…", foreground="#157347")
+        self.pairing_status.configure(text="手机已确认，正在启动连接…", foreground=COLORS["ink"])
         self.show_connected()
         self._start_runtime()
 
     def show_connected(self) -> None:
         self._clear()
         self._heading("已连接这台电脑", "手机现在可以看到并使用下列 Agent。程序可以最小化到后台运行。")
-        card = ttk.Frame(self.body, style="Card.TFrame", padding=18)
+        card = ttk.Frame(self.page, style="Card.TFrame", padding=18)
         card.pack(fill="x", pady=(3, 14))
-        ttk.Label(card, text=self.config_value.device_name, font=("Arial", 15, "bold")).pack(anchor="w")
-        ttk.Label(card, text=self.config_value.device_id, style="Small.TLabel").pack(anchor="w", pady=(4, 12))
+        ttk.Label(card, text=self.config_value.device_name, style="CardLabel.TLabel",
+                  font=("Arial", 15, "bold")).pack(anchor="w")
+        ttk.Label(card, text=self.config_value.device_id, style="CardMeta.TLabel").pack(
+            anchor="w", pady=(4, 12))
         for item in self.config_value.selected_agents:
             ttk.Label(card, text=f"✓  {item.get('display_name') or item.get('adapter')}",
-                      font=("Arial", 11)).pack(anchor="w", pady=3)
-        self.connection_status = ttk.Label(self.body, text="正在启动…", style="Sub.TLabel")
+                      style="CardLabel.TLabel", font=("Arial", 11)).pack(anchor="w", pady=3)
+        self.connection_status = ttk.Label(self.page, text="正在启动…", style="Sub.TLabel")
         self.connection_status.pack(anchor="w", pady=(5, 18))
-        actions = ttk.Frame(self.body)
-        actions.pack(fill="x", side="bottom")
-        ttk.Button(actions, text="重新配对", command=self._re_pair).pack(side="left")
-        ttk.Button(actions, text="停止连接", command=self._stop_runtime).pack(side="right")
+        self._bottom_buttons(self._re_pair, self._stop_runtime,
+                             next_text="停止连接", back_text="重新配对")
 
     def _start_runtime(self) -> None:
         if self.runtime:
@@ -445,9 +570,12 @@ class ConnectorApp(tk.Tk):
         if hasattr(self, "connection_status") and self.connection_status.winfo_exists():
             labels = {"online": "在线", "connecting": "连接中", "offline": "离线重试中",
                       "stopped": "已停止", "revoked": "凭据已撤销", "error": "错误"}
+            foreground = (COLORS["ink"] if state in {"online", "stopped"}
+                          else COLORS["muted"] if state in {"connecting", "offline"}
+                          else COLORS["ink"])
             self.connection_status.configure(text=f"状态：{labels.get(state, state)}"
                                              + (f" · {detail}" if detail else ""),
-                                             foreground="#157347" if state == "online" else "#b42318" if state in {"error", "revoked"} else "#64708a")
+                                             foreground=foreground)
 
     def _auto_connect_if_configured(self) -> None:
         if not self.config_value.device_id or not self.config_value.selected_agents:
@@ -478,12 +606,16 @@ class ConnectorApp(tk.Tk):
 
     def _bottom_buttons(self, back: Any, next_action: Any, *,
                         next_text: str, back_text: str = "上一步") -> None:
-        bar = ttk.Frame(self.body)
-        bar.pack(fill="x", side="bottom", pady=(18, 0))
-        if back is not None:
-            ttk.Button(bar, text=back_text, command=back).pack(side="left")
-        if next_action is not None:
-            ttk.Button(bar, text=next_text, style="Primary.TButton", command=next_action).pack(side="right")
+        if back is None:
+            self.nav_back.grid_remove()
+        else:
+            self.nav_back.configure(text=back_text, command=back)
+            self.nav_back.grid()
+        if next_action is None:
+            self.nav_next.grid_remove()
+        else:
+            self.nav_next.configure(text=next_text, command=next_action)
+            self.nav_next.grid()
 
     def _close(self) -> None:
         self._polling = False
@@ -502,6 +634,12 @@ class ConnectorApp(tk.Tk):
 
 
 def main() -> None:
+    # PyInstaller uses the same executable for the optional Claude MCP child.
+    # A frozen executable cannot execute a bundled .py path as a script, so
+    # reserve a small headless entry point for that child process.
+    if "--message-agent-mcp" in sys.argv:
+        from xiaobai_connector.message_agent_mcp import main as mcp_main
+        raise SystemExit(mcp_main())
     app = ConnectorApp()
     app.mainloop()
 

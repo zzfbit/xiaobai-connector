@@ -13,6 +13,9 @@ from typing import Any
 
 
 SEQUENCE_GAP_SECONDS = 60
+RECOVERABLE_TERMINAL_CODES = frozenset({
+    "connector_restarted", "connector_stopped", "delivery_timeout", "stale_run",
+})
 
 
 def _now() -> str:
@@ -115,13 +118,96 @@ class Spool:
     def unfinished_starts(self) -> list[dict[str, Any]]:
         with self._lock, self._db() as db:
             rows = db.execute(
-                "SELECT * FROM commands WHERE event_type='run.start' AND state IN ('persisted','running')"
+                "SELECT * FROM commands WHERE event_type='run.start' "
+                "AND state IN ('persisted','running') ORDER BY created_at,event_id"
             ).fetchall()
             return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
 
+    def recovery_payload(self, run_id: str) -> dict[str, Any] | None:
+        """Rebuild a run.start payload with the last local Codex session id."""
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return None
+        with self._lock, self._db() as db:
+            command = db.execute(
+                "SELECT payload_json FROM commands WHERE run_id=? "
+                "AND event_type='run.start' ORDER BY created_at,event_id LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if command is None:
+                return None
+            try:
+                payload = json.loads(command["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(payload, dict):
+                return None
+            adapter = str(payload.get("adapter") or "").lower()
+            rows = db.execute(
+                "SELECT event_type,payload_json FROM events WHERE run_id=? "
+                "AND event_type IN ('run.accepted','run.started') ORDER BY rowid DESC",
+                (run_id,),
+            ).fetchall()
+        if adapter == "codex":
+            session = dict(payload.get("codex_session") or {})
+            if not str(session.get("thread_id") or "").strip():
+                for row in rows:
+                    try:
+                        event = json.loads(row["payload_json"] or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    thread_id = str(event.get("adapter_session_id") or "").strip()
+                    if thread_id:
+                        session["thread_id"] = thread_id
+                        break
+            payload["codex_session"] = session
+        elif adapter == "claude" and not str(payload.get("claude_session_id") or "").strip():
+            for row in rows:
+                try:
+                    event = json.loads(row["payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                session_id = str(event.get("adapter_session_id") or "").strip()
+                if session_id:
+                    payload["claude_session_id"] = session_id
+                    break
+        return payload
+
+    def terminal_event(self, run_id: str) -> dict[str, Any] | None:
+        """Return the newest locally persisted terminal event for one run."""
+        with self._lock, self._db() as db:
+            row = db.execute(
+                "SELECT event_id,event_type,state,payload_json FROM events "
+                "WHERE run_id=? AND event_type IN "
+                "('run.completed','run.failed','run.canceled') ORDER BY rowid DESC LIMIT 1",
+                (str(run_id or ""),),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            return {**dict(row), "payload": payload if isinstance(payload, dict) else {}}
+
+    def suppress_recoverable_terminals(self, run_id: str) -> int:
+        """Hide an old restart marker before emitting a recovered run."""
+        codes = tuple(sorted(RECOVERABLE_TERMINAL_CODES))
+        placeholders = ",".join("?" for _ in codes)
+        with self._lock, self._db() as db:
+            cursor = db.execute(
+                """UPDATE events SET state='acknowledged',acknowledged_at=?
+                   WHERE run_id=? AND event_type IN ('run.failed','run.canceled')
+                     AND state IN ('pending','sent')
+                     AND json_extract(payload_json,'$.code') IN ("""
+                + placeholders + ")",
+                (_now(), str(run_id or ""), *codes),
+            )
+            return int(cursor.rowcount or 0)
+
     def enqueue_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> str:
         event_id = "evt_" + uuid.uuid4().hex
-        value = {"run_id": run_id, **payload}
+        value = dict(payload) if event_type == "agent.status" else {"run_id": run_id, **payload}
         with self._lock, self._db() as db:
             db.execute("INSERT INTO events VALUES (?,?,?,?, 'pending', ?,NULL,NULL)",
                        (event_id, run_id, event_type,
@@ -133,19 +219,91 @@ class Spool:
             timespec="milliseconds").replace("+00:00", "Z")
         with self._lock, self._db() as db:
             rows = db.execute(
-                "SELECT * FROM events WHERE state='pending' OR (state='sent' AND last_sent_at<=?) "
-                "ORDER BY rowid LIMIT ?", (cutoff, limit)).fetchall()
+                """WITH active_runs AS (
+                       SELECT DISTINCT run_id FROM commands
+                       WHERE event_type='run.start' AND state IN ('persisted','running')
+                   ), terminal_runs AS (
+                       SELECT DISTINCT run_id FROM events
+                       WHERE event_type IN ('run.completed','run.failed','run.canceled')
+                         AND state IN ('pending','sent')
+                   )
+                   SELECT events.* FROM events
+                   LEFT JOIN active_runs ON active_runs.run_id=events.run_id
+                   LEFT JOIN terminal_runs ON terminal_runs.run_id=events.run_id
+                   WHERE events.state='pending' OR
+                         (events.state='sent' AND events.last_sent_at<=?)
+                   ORDER BY CASE
+                              WHEN active_runs.run_id IS NOT NULL
+                               AND events.event_type IN (
+                                   'run.accepted','run.started','run.awaiting_input',
+                                   'run.awaiting_approval','run.completed','run.failed',
+                                   'run.canceled') THEN 0
+                              WHEN active_runs.run_id IS NOT NULL THEN 1
+                              WHEN terminal_runs.run_id IS NOT NULL THEN 2
+                              WHEN events.event_type IN (
+                                   'run.accepted','run.started','run.awaiting_input',
+                                   'run.awaiting_approval','run.completed','run.failed',
+                                   'run.canceled') THEN 3
+                              WHEN events.event_type IN (
+                                   'agent.history.snapshot','agent.status') THEN 5
+                              ELSE 4
+                            END,
+                            events.rowid LIMIT ?""",
+                (cutoff, limit)).fetchall()
             return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
 
     def mark_sent(self, event_id: str) -> None:
         with self._lock, self._db() as db:
-            db.execute("UPDATE events SET state='sent',last_sent_at=? WHERE event_id=?",
+            db.execute("UPDATE events SET state='sent',last_sent_at=? "
+                       "WHERE event_id=? AND state IN ('pending','sent')",
                        (_now(), event_id))
 
-    def acknowledge(self, event_id: str, accepted: bool) -> None:
+    def acknowledge(self, event_id: str, accepted: bool, *, retryable: bool = False,
+                    error_code: str = "") -> None:
         with self._lock, self._db() as db:
-            db.execute("UPDATE events SET state=?,acknowledged_at=? WHERE event_id=?",
-                       ("acknowledged" if accepted else "failed", _now(), event_id))
+            row = db.execute(
+                "SELECT run_id FROM events WHERE event_id=?", (event_id,)).fetchone()
+            if row is None:
+                return
+            if accepted:
+                db.execute("UPDATE events SET state='acknowledged',acknowledged_at=? "
+                           "WHERE event_id=?", (_now(), event_id))
+                return
+            if retryable:
+                db.execute("UPDATE events SET state='pending',acknowledged_at=NULL "
+                           "WHERE event_id=?", (event_id,))
+                if error_code == "stale_connection" and str(row["run_id"]):
+                    db.execute(
+                        """UPDATE events SET state='pending',acknowledged_at=NULL
+                           WHERE run_id=? AND event_type LIKE 'run.%'
+                             AND state IN ('acknowledged','failed')""",
+                        (row["run_id"],),
+                    )
+                return
+            db.execute("UPDATE events SET state='failed',acknowledged_at=? WHERE event_id=?",
+                       (_now(), event_id))
+
+    def requeue_failed_completions(self) -> list[str]:
+        """Replay terminal events lost during a stale-connection race."""
+        with self._lock, self._db() as db:
+            rows = db.execute(
+                """SELECT DISTINCT completed.run_id
+                   FROM events completed
+                   WHERE completed.event_type='run.completed'
+                     AND completed.state='failed'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM events terminal
+                       WHERE terminal.run_id=completed.run_id
+                         AND terminal.event_type IN ('run.failed','run.canceled')
+                     )"""
+            ).fetchall()
+            run_ids = [str(row["run_id"]) for row in rows if str(row["run_id"])]
+            for run_id in run_ids:
+                db.execute(
+                    """UPDATE events SET state='pending',acknowledged_at=NULL
+                       WHERE run_id=? AND event_type LIKE 'run.%'
+                         AND state IN ('acknowledged','failed')""", (run_id,))
+            return run_ids
 
     def event_count(self, run_id: str, event_type: str) -> int:
         with self._lock, self._db() as db:

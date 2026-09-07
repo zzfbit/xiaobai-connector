@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import random
+import re
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
@@ -17,9 +20,10 @@ from websockets.exceptions import ConnectionClosed
 from .adapters.codex import CodexQueueError
 from .adapters.router import AdapterRouter
 from .config import ConnectorConfig
+from .event_stream import ConnectorEventStream, normalize_progress
 from .models import RunControl, RunRequest
 from .protocol import ack, decode, make
-from .spool import Spool
+from .spool import RECOVERABLE_TERMINAL_CODES, Spool
 
 
 class GatewayClient:
@@ -37,6 +41,10 @@ class GatewayClient:
         self._controls: dict[str, RunControl] = {}
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._ack_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._history_fingerprints: dict[str, str] = {}
+        self._status_fingerprints: dict[str, str] = {}
+        self._history_projection_lock = asyncio.Lock()
+        self._status_projection_lock = asyncio.Lock()
         self._on_status = on_status
 
     def _status(self, state: str, detail: str = "") -> None:
@@ -113,7 +121,7 @@ class GatewayClient:
                 "connector_version": self.config.connector_version,
                 "platform": self.config.platform,
                 "event_types": [
-                    "agents.snapshot", "agent.status", "pong", "ack",
+                    "agents.snapshot", "agent.status", "agent.history.snapshot", "pong", "ack",
                     "run.accepted", "run.started", "run.output.delta", "run.progress",
                     "run.awaiting_input", "run.awaiting_approval", "run.completed",
                     "run.failed", "run.canceled", "run.steer", "codex.thread.queue",
@@ -137,6 +145,8 @@ class GatewayClient:
                     or not snapshot_ack.payload.get("accepted")):
                 raise RuntimeError("服务器拒绝了 Agent 列表")
             self.registered_agents = list(snapshot_ack.payload.get("agents") or [])
+            self.spool.requeue_failed_completions()
+            self._recover_unfinished()
             self._status("online", f"已连接，{len(self.registered_agents)} 个 Agent")
             await self._hold(websocket, lock, stop)
 
@@ -144,8 +154,10 @@ class GatewayClient:
         sender = asyncio.create_task(self._event_sender(websocket, lock))
         receiver = asyncio.create_task(self._event_receiver(websocket, lock))
         stop_task = asyncio.create_task(stop.wait())
+        history = asyncio.create_task(self._history_projector())
+        status = asyncio.create_task(self._status_projector())
         sequence_runner = asyncio.create_task(self._task_sequence_loop())
-        waiters = {sender, receiver, sequence_runner, stop_task}
+        waiters = {sender, receiver, history, status, sequence_runner, stop_task}
         done, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
         if stop_task in done and stop.is_set():
             await websocket.close(1000, "connector stopping")
@@ -158,15 +170,152 @@ class GatewayClient:
             if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                 raise result
 
+    async def _history_projector(self) -> None:
+        while True:
+            try:
+                await self._queue_history_snapshots()
+            except Exception:
+                # History is advisory. A locked or partially written local
+                # Agent database must never tear down the command lane.
+                pass
+            await asyncio.sleep(2)
+
+    async def _status_projector(self) -> None:
+        while True:
+            try:
+                await self._queue_agent_status()
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+    async def _queue_agent_status(self, *, force: bool = False) -> None:
+        reader = getattr(self.router, "status_snapshots", None)
+        if not callable(reader) or self._status_projection_lock.locked():
+            return
+        async with self._status_projection_lock:
+            try:
+                snapshots = await asyncio.wait_for(
+                    asyncio.to_thread(reader), timeout=5)
+            except Exception:
+                return
+        for snapshot in snapshots or []:
+            if not isinstance(snapshot, dict):
+                continue
+            local_ref = str(snapshot.get("local_ref") or "").strip()
+            status = str(snapshot.get("status") or "").strip().lower()
+            if not local_ref or status not in {"online", "busy", "offline"}:
+                continue
+            payload: dict[str, Any] = {"local_ref": local_ref, "status": status}
+            progress = normalize_progress({"progress": snapshot.get("progress")})
+            if progress:
+                payload["progress"] = progress
+            fingerprint_value = dict(payload)
+            fingerprint_progress = fingerprint_value.get("progress")
+            if isinstance(fingerprint_progress, dict):
+                fingerprint_progress = dict(fingerprint_progress)
+                fingerprint_progress.pop("heartbeat_at", None)
+                fingerprint_value["progress"] = fingerprint_progress
+            fingerprint = hashlib.sha256(json.dumps(
+                fingerprint_value, ensure_ascii=False, separators=(",", ":"),
+                sort_keys=True).encode("utf-8")).hexdigest()
+            if not force and self._status_fingerprints.get(local_ref) == fingerprint:
+                continue
+            self.spool.enqueue_event("status:" + local_ref, "agent.status", payload)
+            self._status_fingerprints[local_ref] = fingerprint
+
+    async def _queue_history_snapshots(self) -> None:
+        reader = getattr(self.router, "history_snapshots", None)
+        if not callable(reader) or self._history_projection_lock.locked():
+            return
+        async with self._history_projection_lock:
+            try:
+                snapshots = await asyncio.wait_for(
+                    asyncio.to_thread(reader), timeout=5)
+            except Exception:
+                return
+        for snapshot in snapshots or []:
+            if not isinstance(snapshot, dict):
+                continue
+            local_ref = str(snapshot.get("local_ref") or "").strip()
+            source = str(snapshot.get("source") or "").strip()
+            if not local_ref or source not in {"hermes_bot_chat_v1", "codex_threads_v1"}:
+                continue
+            payload: dict[str, Any] = {
+                "local_ref": local_ref,
+                "source": source,
+            }
+            if source == "hermes_bot_chat_v1":
+                messages = snapshot.get("messages")
+                if not isinstance(messages, list):
+                    continue
+                payload["messages"] = messages
+            else:
+                threads = snapshot.get("threads")
+                if not isinstance(threads, list):
+                    continue
+                payload["threads"] = threads
+                capabilities = snapshot.get("capabilities")
+                if isinstance(capabilities, dict):
+                    payload["capabilities"] = capabilities
+            fingerprint = hashlib.sha256(json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"),
+                sort_keys=True).encode("utf-8")).hexdigest()
+            if self._history_fingerprints.get(local_ref) == fingerprint:
+                continue
+            self.spool.enqueue_event("history:" + local_ref,
+                                     "agent.history.snapshot", payload)
+            self._history_fingerprints[local_ref] = fingerprint
+
+    def _recover_unfinished(self) -> None:
+        """Resume interrupted local runs from the durable event spool."""
+        for row in self.spool.unfinished_starts():
+            run_id = str(row["run_id"] or "")
+            active = self._tasks.get(run_id)
+            if active is not None and not active.done():
+                continue
+            payload = self.spool.recovery_payload(run_id) or dict(row["payload"])
+            if not self._owns_local_payload(payload):
+                continue
+            terminal = self.spool.terminal_event(run_id)
+            terminal_code = str((terminal or {}).get("payload", {}).get("code") or "")
+            if terminal is not None and terminal_code not in RECOVERABLE_TERMINAL_CODES:
+                self.spool.set_command_state(str(row["event_id"]), "finished")
+                continue
+            if terminal is not None:
+                self.spool.suppress_recoverable_terminals(run_id)
+            payload["_connector_recovery"] = True
+            payload["_output_seq_start"] = self.spool.output_sequence(run_id)
+            control = self._controls.setdefault(run_id, RunControl())
+            resumed = SimpleNamespace(
+                event_id=str(row["event_id"]), event_type=str(row["event_type"]),
+                payload=payload)
+            self._tasks[run_id] = asyncio.create_task(
+                self._execute(resumed, control))
+
     async def _event_sender(self, websocket: Any, lock: asyncio.Lock) -> None:
         while True:
             rows = self.spool.pending_events()
             for row in rows:
                 envelope = make(row["event_type"], self.config.device_id,
                                 self.connection_id, row["payload"], event_id=row["event_id"])
-                async with lock:
-                    await websocket.send(envelope.dumps())
+                history_waiter: asyncio.Future[dict[str, Any]] | None = None
+                if row["event_type"] == "agent.history.snapshot":
+                    history_waiter = asyncio.get_running_loop().create_future()
+                    self._ack_waiters[row["event_id"]] = history_waiter
+                try:
+                    async with lock:
+                        await websocket.send(envelope.dumps())
+                except ConnectionClosed:
+                    if history_waiter is not None:
+                        self._ack_waiters.pop(row["event_id"], None)
+                    return
                 self.spool.mark_sent(row["event_id"])
+                if history_waiter is not None:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(history_waiter), timeout=30)
+                    except asyncio.TimeoutError:
+                        self._ack_waiters.pop(row["event_id"], None)
+                        raise RuntimeError("Agent 历史同步 ACK 超时") from None
             await asyncio.sleep(0.1)
 
     async def _event_receiver(self, websocket: Any, lock: asyncio.Lock) -> None:
@@ -182,8 +331,15 @@ class GatewayClient:
                                                {"ping_event_id": envelope.event_id}).dumps())
                 continue
             if envelope.type == "ack":
-                self.spool.acknowledge(envelope.event_id,
-                                       bool(envelope.payload.get("accepted")))
+                error = envelope.payload.get("error")
+                error = error if isinstance(error, dict) else {}
+                error_code = str(error.get("code") or "")
+                retryable = bool(error.get("retryable")) or error_code in {
+                    "stale_connection", "rate_limited",
+                }
+                self.spool.acknowledge(
+                    envelope.event_id, bool(envelope.payload.get("accepted")),
+                    retryable=retryable, error_code=error_code)
                 waiter = self._ack_waiters.pop(envelope.event_id, None)
                 if waiter is not None and not waiter.done():
                     waiter.set_result(dict(envelope.payload))
@@ -371,8 +527,15 @@ class GatewayClient:
             session = payload.get("codex_session")
             cwd = (str((session or {}).get("cwd") or "").strip()
                    if isinstance(session, dict) else "")
-            if not cwd.startswith("/") or len(cwd) > 1_024 or "\x00" in cwd:
+            if (not self._is_absolute_path(cwd) or len(cwd) > 1_024
+                    or "\x00" in cwd):
                 raise ValueError("顺序任务项目路径无效")
+
+    @staticmethod
+    def _is_absolute_path(value: str) -> bool:
+        """Accept POSIX, drive-letter, and UNC paths from Windows clients."""
+        return value.startswith("/") or bool(re.match(r"^[A-Za-z]:[\\/]", value)) \
+            or value.startswith("\\\\")
 
     async def _task_sequence_loop(self) -> None:
         """Run saved ordered tasks locally, including after reconnects."""
@@ -452,6 +615,7 @@ class GatewayClient:
         payload = envelope.payload
         run_id = str(payload.get("run_id") or "")
         local_ref = str(payload.get("local_ref") or "")
+        adapter_name = str(payload.get("adapter") or "").strip().lower()
         sequence_id = str(payload.get("sequence_id") or "").strip()
         sequence_item_id = str(payload.get("sequence_item_id") or "").strip()
         request = RunRequest(
@@ -460,54 +624,125 @@ class GatewayClient:
             text=str((payload.get("input") or {}).get("text") or ""),
             deadline_at=str(payload.get("deadline_at") or ""), payload=payload)
         adapter = self.router.adapter_for(local_ref)
-        lock = self._agent_locks.setdefault(local_ref, asyncio.Lock())
+        async def raw_emit(event_type: str, value: dict[str, Any] | None = None) -> Any:
+            value = dict(value) if isinstance(value, dict) else {}
+            if event_type == "agent.message.send":
+                policy = dict(request.payload.get("policy") or {})
+                if not bool(policy.get("message_agent_allowed")):
+                    raise RuntimeError("message_agent_not_allowed")
+                if set(value) != {"target", "message"}:
+                    raise RuntimeError("message_agent 参数无效")
+                target = str(value.get("target") or "").strip()
+                message = str(value.get("message") or "").strip()
+                if not target or not message or len(target) > 160 or len(message) > 16_000:
+                    raise RuntimeError("message_agent 参数无效")
+                event_id = self.spool.enqueue_event(run_id, event_type, {
+                    "delivery_id": "delivery_" + uuid.uuid4().hex,
+                    "source_run_id": run_id, "source_agent_id": request.agent_id,
+                    "target": target, "message": message,
+                })
+                waiter = asyncio.get_running_loop().create_future()
+                self._ack_waiters[event_id] = waiter
+                try:
+                    result = await asyncio.wait_for(asyncio.shield(waiter), timeout=8)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError("message_agent ACK 超时") from exc
+                finally:
+                    self._ack_waiters.pop(event_id, None)
+                if not result.get("accepted"):
+                    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+                    raise RuntimeError(
+                        str(error.get("code") or "message_agent 被拒绝") + ": "
+                        + str(error.get("message") or ""))
+                return result
+
+            terminal = {"run.completed", "run.failed", "run.canceled"}
+            if event_type in terminal:
+                previous = self.spool.terminal_event(run_id)
+                previous_code = str(
+                    (previous or {}).get("payload", {}).get("code") or "")
+                if previous is not None and not (
+                        bool(payload.get("_connector_recovery"))
+                        and previous_code in RECOVERABLE_TERMINAL_CODES):
+                    return None
+            if sequence_id:
+                value = {**value, "sequence_id": sequence_id,
+                         "sequence_item_id": sequence_item_id}
+            event_id = self.spool.enqueue_event(run_id, event_type, value)
+            if sequence_id and sequence_item_id and event_type in terminal:
+                state = {
+                    "run.completed": "completed",
+                    "run.failed": "failed",
+                    "run.canceled": "canceled",
+                }[event_type]
+                self.spool.finish_task_sequence_item(
+                    sequence_id, sequence_item_id, run_id, state,
+                    str(value.get("detail") or ""))
+            return event_id
+
+        session = dict(payload.get("codex_session") or {})
+        thread_id = str(session.get("thread_id") or "").strip()
+        if adapter_name == "codex":
+            execution_key = "codex-thread:" + thread_id if thread_id else "codex-new:" + run_id
+        else:
+            execution_key = local_ref
+        lock = self._agent_locks.setdefault(execution_key, asyncio.Lock())
+        output_seq_start = self.spool.output_sequence(run_id)
+        try:
+            output_seq_start = max(output_seq_start, int(payload.get("_output_seq_start") or 0))
+        except (TypeError, ValueError):
+            pass
+        stream = ConnectorEventStream(raw_emit, output_seq_start=output_seq_start)
         async with lock:
             self.spool.set_command_state(envelope.event_id, "running")
-            async def emit(event_type: str, value: dict[str, Any]) -> Any:
-                terminal = {"run.completed", "run.failed", "run.canceled"}
-                if event_type in terminal and any(
-                        self.spool.event_count(run_id, kind) for kind in terminal):
-                    return None
-                if sequence_id:
-                    value = {**value, "sequence_id": sequence_id,
-                             "sequence_item_id": sequence_item_id}
-                event_id = self.spool.enqueue_event(run_id, event_type, value)
-                if (sequence_id and sequence_item_id and event_type in terminal):
-                    state = {
-                        "run.completed": "completed",
-                        "run.failed": "failed",
-                        "run.canceled": "canceled",
-                    }[event_type]
-                    self.spool.finish_task_sequence_item(
-                        sequence_id, sequence_item_id, run_id, state,
-                        str(value.get("detail") or ""))
-                return event_id
+            started_at = datetime.now(timezone.utc)
 
-            heartbeat = asyncio.create_task(self._heartbeat(run_id, emit))
+            async def heartbeat() -> None:
+                while True:
+                    elapsed = int((datetime.now(timezone.utc) - started_at).total_seconds())
+                    await stream("run.progress", {"progress": {
+                        "phase": "thinking", "message": "正在思考",
+                        "elapsed_seconds": elapsed,
+                        "heartbeat_at": datetime.now(timezone.utc).isoformat(
+                            timespec="seconds").replace("+00:00", "Z"),
+                    }})
+                    await asyncio.sleep(10)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
             try:
                 if control.cancel.is_set():
-                    await emit("run.canceled", {"code": "user_canceled", "detail": "用户取消"})
+                    await stream("run.canceled", {
+                        "code": "user_canceled", "detail": "用户取消"})
+                elif adapter_name in {"codex", "claude", "hermes"}:
+                    # These are real local coding agents and may legitimately
+                    # run for hours; the Gateway's deadline only governs queue
+                    # delivery, never an accepted local execution.
+                    await adapter.execute(request, stream, control)
                 else:
-                    await adapter.execute(request, emit, control)
+                    try:
+                        deadline = datetime.fromisoformat(
+                            request.deadline_at.replace("Z", "+00:00"))
+                        remaining = max(0.01, (deadline - datetime.now(timezone.utc)).total_seconds())
+                    except ValueError:
+                        remaining = 1200
+                    await asyncio.wait_for(
+                        adapter.execute(request, stream, control), timeout=remaining)
+            except asyncio.TimeoutError:
+                await stream("run.failed", {"code": "timeout", "detail": "任务超过截止时间"})
             except asyncio.CancelledError:
-                await emit("run.failed", {"code": "connector_stopped",
-                                           "detail": "Connector 停止，任务已终止"})
+                await stream("run.failed", {
+                    "code": "connector_stopped",
+                    "detail": "Connector 在任务执行期间停止；为避免重复执行，本次任务已终止",
+                })
                 raise
             except Exception as exc:
-                await emit("run.failed", {"code": "adapter_error", "detail": str(exc)[:500]})
+                if adapter_name == "codex":
+                    await stream("run.failed", {
+                        "code": "unexpected_stop", "detail": "Codex 任务中途意外停止"})
+                else:
+                    await stream("run.failed", {
+                        "code": "adapter_error", "detail": str(exc)[:500]})
             finally:
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
                 self.spool.set_command_state(envelope.event_id, "finished")
-
-    async def _heartbeat(self, run_id: str, emit: Callable[..., Any]) -> None:
-        started_at = datetime.now(timezone.utc)
-        while True:
-            elapsed = int((datetime.now(timezone.utc) - started_at).total_seconds())
-            await emit("run.progress", {"progress": {
-                "phase": "thinking", "message": "正在思考",
-                "elapsed_seconds": elapsed,
-                "heartbeat_at": datetime.now(timezone.utc).isoformat(
-                    timespec="seconds").replace("+00:00", "Z"),
-            }})
-            await asyncio.sleep(10)

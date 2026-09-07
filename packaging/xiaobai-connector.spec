@@ -9,12 +9,20 @@ project = Path(SPECPATH).parent
 with (project / "pyproject.toml").open("rb") as handle:
     project_version = str(tomllib.load(handle)["project"]["version"])
 hiddenimports = collect_submodules("websockets") + ["keyring.backends.Windows", "keyring.backends.macOS"]
+asset_dir = project / "src" / "xiaobai_connector" / "assets"
 
 a = Analysis(
     [str(project / "src" / "xiaobai_connector" / "ui" / "app.py")],
     pathex=[str(project / "src")],
     binaries=[],
-    datas=[],
+    datas=[
+        (str(asset_dir), "xiaobai_connector/assets"),
+        # Claude Code starts this file as a separate stdio MCP child in source
+        # builds. Frozen builds use the --message-agent-mcp entry point, but
+        # keeping the module as data also supports one-folder/debug builds.
+        (str(project / "src" / "xiaobai_connector" / "message_agent_mcp.py"),
+         "xiaobai_connector"),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
