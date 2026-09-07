@@ -18,8 +18,10 @@ from typing import Any
 from .. import __version__
 from ..agent_identity import CODEX_AVATAR, CODEX_PRESENTATION, clone
 from ..codex_sessions import CodexSessionClient, CodexSessionError
+from ..codex_desktop_bridge import CodexDesktopBridge, CodexDesktopBridgeUnavailable
 from .base import (Emit, LocalAgent, RunControl, RunRequest, direct_turn_text,
-                   executable_command, request_prompt)
+                   executable_available, executable_command, request_prompt,
+                   subprocess_options)
 from .codex_usage import CodexUsageExtensionAdapter
 
 
@@ -94,8 +96,7 @@ def resolve_codex_binary(configured: str | None = None) -> str:
 
 
 def _codex_available(binary: str) -> bool:
-    path = Path(binary).expanduser()
-    return bool(shutil.which(binary) or (path.is_file() and os.access(path, os.X_OK)))
+    return executable_available(binary)
 
 
 class CodexAdapter:
@@ -214,10 +215,21 @@ class CodexAdapter:
 
     def status_snapshots(self) -> list[dict[str, Any]]:
         local_ref = str(self.definition.get("local_ref") or "codex:default")
-        try:
-            return [CodexSessionClient(binary=self.binary).status(local_ref=local_ref)]
-        except (CodexSessionError, OSError, ValueError):
+        # The Connector's WebSocket connection is the Agent's liveness signal.
+        # A local app-server/session scan can fail transiently (and can be
+        # unavailable while Codex is starting), but that must not turn an
+        # otherwise discovered Codex executable into an offline mobile Agent.
+        discovered = self.discover()[0]
+        if discovered.status != "online":
             return [{"local_ref": local_ref, "status": "offline"}]
+        try:
+            snapshot = CodexSessionClient(binary=self.binary).status(local_ref=local_ref)
+        except (CodexSessionError, OSError, ValueError):
+            return [{"local_ref": local_ref, "status": "online"}]
+        if str(snapshot.get("status") or "").lower() == "busy":
+            return [{"local_ref": local_ref, "status": "busy",
+                     "progress": snapshot.get("progress") or {}}]
+        return [{"local_ref": local_ref, "status": "online"}]
 
     async def execute(self, request: RunRequest, emit: Emit,
                       control: RunControl) -> None:
@@ -239,7 +251,7 @@ class CodexAdapter:
             *executable_command(self.binary, "app-server", "--stdio"),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, limit=READ_LIMIT)
+            start_new_session=True, limit=READ_LIMIT, **subprocess_options())
         next_id = 1
         thread_id = requested_thread_id
         turn_id = ""
@@ -338,7 +350,7 @@ class CodexAdapter:
                 *executable_command(self.binary, "app-server", "--stdio"),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True, limit=READ_LIMIT)
+                start_new_session=True, limit=READ_LIMIT, **subprocess_options())
             await send("initialize", {
                 "clientInfo": {"name": "xiaobai-connector", "version": __version__},
                 "capabilities": {
@@ -653,12 +665,12 @@ class CodexAdapter:
     async def queue_thread_message(self, *, thread_id: str, text: str,
                                    attachments: list[dict[str, Any]] | None = None,
                                    client_message_id: str) -> bool:
-        """Insert a phone message into a desktop-owned Codex thread.
+        """Deliver a phone message into a desktop-owned Codex thread.
 
         The ChatGPT desktop app owns the long-lived writer for the thread.  A
-        short-lived app-server bridge may therefore only call
-        ``thread/queue/add``; opening another ``thread/resume`` would race the
-        desktop process and make the phone message appear to disappear.
+        Desktop-created thread should use its existing writer first. A
+        short-lived ``thread/queue/add`` app-server bridge remains the durable
+        restart-safe fallback.
         """
         if not _codex_available(self.binary):
             raise CodexQueueError("没有找到 Codex 命令，请重新扫描本机 Agent")
@@ -675,6 +687,20 @@ class CodexAdapter:
         if not str(thread_id or "").strip():
             raise CodexQueueError("Codex 会话 ID 为空")
         message_id = str(client_message_id or "").strip()
+
+        # Desktop-created threads are owned by ChatGPT Desktop's long-lived
+        # app-server writer. Use the Desktop app-tools bridge first so a phone
+        # message reaches that writer while the turn is still active. Only a
+        # genuinely unavailable bridge falls back to the durable queue; this
+        # avoids duplicating a message after the Desktop host accepted it.
+        try:
+            await CodexDesktopBridge(binary=self.binary).send_message(
+                thread_id=str(thread_id).strip(), text=queued_text,
+                client_message_id=message_id)
+            return True
+        except CodexDesktopBridgeUnavailable:
+            pass
+
         for attempt in range(3):
             try:
                 await self._queue_once(
@@ -714,6 +740,7 @@ class CodexAdapter:
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
             limit=READ_LIMIT,
+            **subprocess_options(),
         )
         request_id = 1
 

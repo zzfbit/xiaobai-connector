@@ -23,6 +23,26 @@ class SpoolTests(unittest.TestCase):
             self.assertTrue(spool.persist_command("evt_12345678", "run.start", payload))
             self.assertFalse(spool.persist_command("evt_other", "run.start", payload))
 
+    def test_recovery_payload_recovers_hermes_durable_session_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = Spool(Path(directory) / "spool.sqlite3")
+            payload = {
+                "run_id": "run_hermes_recovery",
+                "agent_id": "agent_1",
+                "local_ref": "hermes:bot:default",
+                "adapter": "hermes",
+                "input": {"text": "继续"},
+            }
+            spool.persist_command("evt_hermes_recovery", "run.start", payload)
+            spool.enqueue_event("run_hermes_recovery", "run.started", {
+                "adapter_session_id": "20260907_123456_abcdef",
+            })
+
+            recovered = spool.recovery_payload("run_hermes_recovery")
+
+        self.assertEqual(
+            recovered.get("hermes_session_id"), "20260907_123456_abcdef")
+
 
 if __name__ == "__main__":
     unittest.main()

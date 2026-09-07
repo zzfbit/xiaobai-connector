@@ -7,10 +7,15 @@ import os
 import platform
 import base64
 import binascii
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from ..models import Emit, ExecutionAdapter, LocalAgent, RunControl, RunRequest
+
+
+WINDOWS_EXECUTABLE_SUFFIXES = frozenset({".exe", ".cmd", ".bat", ".com"})
 
 
 def executable_command(binary: str, *args: str) -> list[str]:
@@ -18,6 +23,29 @@ def executable_command(binary: str, *args: str) -> list[str]:
     if platform.system() == "Windows" and Path(binary).suffix.lower() in {".cmd", ".bat"}:
         return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", binary, *args]
     return [binary, *args]
+
+
+def executable_available(binary: str) -> bool:
+    """Use the same executable check on the setup screen and at runtime."""
+    path = Path(str(binary or "")).expanduser()
+    if platform.system() == "Windows":
+        # ``os.access(..., X_OK)`` is not a reliable test for .cmd/.bat files
+        # on Windows.  Discovery accepts these files, so runtime status must
+        # accept them too or the mobile Agent will be reported offline.
+        return bool(
+            (path.is_file() and path.suffix.lower() in WINDOWS_EXECUTABLE_SUFFIXES)
+            or shutil.which(str(binary or ""))
+        )
+    return bool(shutil.which(str(binary or ""))
+                or (path.is_file() and os.access(path, os.X_OK)))
+
+
+def subprocess_options() -> dict[str, Any]:
+    """Prevent local Agent child processes from opening Windows consoles."""
+    if platform.system() != "Windows":
+        return {}
+    flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flag} if flag else {}
 
 
 def group_prompt(request: RunRequest) -> str:

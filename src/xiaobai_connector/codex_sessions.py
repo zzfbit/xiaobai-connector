@@ -23,8 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .adapters.base import executable_command
-
+from . import __version__
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
 LOCAL_CATALOG_DB = CODEX_HOME / "sqlite" / "codex-dev.db"
@@ -305,6 +304,10 @@ class CodexSessionClient:
                     for item in turn["items"]:
                         if isinstance(item, dict) and isinstance(item.get("text"), str):
                             item["text"] = item["text"][:4_000]
+                        if isinstance(item, dict) and isinstance(item.get("content"), list):
+                            for part in item["content"]:
+                                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                    part["text"] = part["text"][:4_000]
         return result
 
     @staticmethod
@@ -429,7 +432,8 @@ class CodexSessionClient:
                              if isinstance(item, dict) and item.get("type") == "input_text"]
                     parts = [part for part in parts if part and not part.startswith((
                         "<recommended_plugins>", "# AGENTS.md instructions for ",
-                        "<environment_context>", "<app-context>", RECOVERY_PROMPT_PREFIX,
+                        "<environment_context>", "<app-context>",
+                        "<codex_internal_context>", RECOVERY_PROMPT_PREFIX,
                     ))]
                     text = "\n".join(parts).strip()
                     if not text:
@@ -606,17 +610,23 @@ class CodexSessionClient:
         return result
 
     def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        # Import lazily so this read-only bridge can be imported on its own;
+        # adapters/__init__ imports the adapter router, which imports this
+        # module back through the Codex adapter.
+        from .adapters.base import executable_command, subprocess_options
+
         try:
             proc = subprocess.Popen(
                 executable_command(self.binary, "app-server", "--stdio"),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True,
+                **subprocess_options(),
             )
         except OSError as exc:
             raise CodexSessionError("无法启动本机 Codex") from exc
         try:
             self._write(proc, 1, "initialize", {
-                "clientInfo": {"name": "xiaobai-connector", "version": "0.3.2"},
+                "clientInfo": {"name": "xiaobai-connector", "version": __version__},
                 "capabilities": {"experimentalApi": True},
             })
             self._response(proc, 1)

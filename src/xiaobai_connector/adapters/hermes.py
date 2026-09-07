@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_identity import HERMES_PRESENTATION, clone, hermes_avatar
-from .base import Emit, LocalAgent, RunControl, RunRequest, executable_command, request_prompt
+from .base import (Emit, LocalAgent, RunControl, RunRequest, executable_available,
+                   executable_command, request_prompt, subprocess_options)
 
 
 VALID_MODES = frozenset({"session", "bot"})
@@ -109,8 +110,7 @@ class HermesAdapter:
         return any(path.expanduser().is_dir() for path in self._profile_dirs())
 
     def _available(self) -> bool:
-        path = Path(self.binary).expanduser()
-        return bool(shutil.which(self.binary) or path.is_file())
+        return executable_available(self.binary)
 
     def _profile_dirs(self) -> list[Path]:
         values = [Path("~/.hermes"), Path("~/.xiaobai/hermes")]
@@ -188,7 +188,8 @@ class HermesAdapter:
         proc = await asyncio.create_subprocess_exec(
             *command, cwd=str(workdir), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, limit=16 * 1024 * 1024)
+            start_new_session=True, limit=16 * 1024 * 1024,
+            **subprocess_options())
         started_at = time.time()
         with self._active_lock:
             self._active[request.run_id] = started_at

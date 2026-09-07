@@ -1,7 +1,9 @@
 import sys
 import unittest
+from unittest.mock import patch
 
 from xiaobai_connector.adapters.codex import CodexAdapter
+from xiaobai_connector.codex_sessions import CodexSessionClient
 from xiaobai_connector.adapters.hermes import HermesAdapter
 
 
@@ -29,6 +31,12 @@ class AgentIdentityTests(unittest.TestCase):
         self.assertEqual(agent.avatar["shape"], "circle")
         self.assertEqual(agent.avatar["fallback"], "🪽")
         self.assertTrue(agent.presentation["show_avatars"])
+
+    def test_codex_status_does_not_downgrade_an_available_binary(self):
+        adapter = CodexAdapter({"binary": sys.executable, "enabled": True})
+        with patch.object(CodexSessionClient, "status", return_value={
+                "local_ref": "codex:default", "status": "offline"}):
+            self.assertEqual(adapter.status_snapshots()[0]["status"], "online")
 
 
 if __name__ == "__main__":

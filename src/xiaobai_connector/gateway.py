@@ -447,6 +447,12 @@ class GatewayClient:
                     await websocket.send(ack(
                         envelope, accepted=False, error=self._queue_error(exc)).dumps())
             except (ValueError, KeyError, RuntimeError) as exc:
+                if envelope.type in {"run.steer", "codex.thread.queue"}:
+                    # _dispatch may fail after persist_command() but before
+                    # the type-specific ACK branch can mark the row. Keep the
+                    # durable projection truthful instead of leaving a
+                    # rejected command stuck in ``persisted``.
+                    self.spool.set_command_state(envelope.event_id, "failed")
                 async with lock:
                     await websocket.send(ack(envelope, accepted=False, error={
                         "code": "invalid_command", "message": str(exc)[:500],
@@ -709,6 +715,7 @@ class GatewayClient:
                     await asyncio.sleep(10)
 
             heartbeat_task = asyncio.create_task(heartbeat())
+            preserve_for_recovery = False
             try:
                 if control.cancel.is_set():
                     await stream("run.canceled", {
@@ -730,10 +737,10 @@ class GatewayClient:
             except asyncio.TimeoutError:
                 await stream("run.failed", {"code": "timeout", "detail": "任务超过截止时间"})
             except asyncio.CancelledError:
-                await stream("run.failed", {
-                    "code": "connector_stopped",
-                    "detail": "Connector 在任务执行期间停止；为避免重复执行，本次任务已终止",
-                })
+                # Replacing/restarting Connector is an execution pause, not a
+                # user cancellation. Leave the command in ``running`` so the
+                # next process can recover the same Codex/Claude/Hermes run.
+                preserve_for_recovery = True
                 raise
             except Exception as exc:
                 if adapter_name == "codex":
@@ -745,4 +752,5 @@ class GatewayClient:
             finally:
                 heartbeat_task.cancel()
                 await asyncio.gather(heartbeat_task, return_exceptions=True)
-                self.spool.set_command_state(envelope.event_id, "finished")
+                if not preserve_for_recovery:
+                    self.spool.set_command_state(envelope.event_id, "finished")

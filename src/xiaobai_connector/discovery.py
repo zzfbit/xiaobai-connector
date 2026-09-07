@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .adapters.base import subprocess_options
 from .models import AgentCandidate
 
 
@@ -147,7 +148,8 @@ def _version(path: str | None) -> str:
         return ""
     try:
         result = subprocess.run(_command(path, "--version"), capture_output=True,
-                                text=True, timeout=5, check=False)
+                                text=True, timeout=5, check=False,
+                                **subprocess_options())
     except (OSError, subprocess.SubprocessError):
         return ""
     raw = (result.stdout or result.stderr or "").strip().splitlines()

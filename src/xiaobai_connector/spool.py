@@ -171,6 +171,18 @@ class Spool:
                 if session_id:
                     payload["claude_session_id"] = session_id
                     break
+        elif adapter == "hermes" and not str(payload.get("hermes_session_id") or "").strip():
+            for row in rows:
+                try:
+                    event = json.loads(row["payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                session_id = str(event.get("adapter_session_id") or "").strip()
+                # ``hermes:<profile>`` is the legacy roster identity, not a
+                # durable SessionDB id. Keep it out of recovery payloads.
+                if session_id and not session_id.startswith("hermes:"):
+                    payload["hermes_session_id"] = session_id
+                    break
         return payload
 
     def terminal_event(self, run_id: str) -> dict[str, Any] | None:

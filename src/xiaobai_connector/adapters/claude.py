@@ -13,7 +13,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .base import Emit, LocalAgent, RunControl, RunRequest, direct_turn_text, executable_command, request_prompt
+from .base import (Emit, LocalAgent, RunControl, RunRequest, direct_turn_text,
+                   executable_available, executable_command, request_prompt,
+                   subprocess_options)
 
 
 MCP_BRIDGE = Path(__file__).resolve().parents[1] / "message_agent_mcp.py"
@@ -77,7 +79,7 @@ class ClaudeAdapter:
                        or shutil.which("claude") or "claude")
 
     def discover(self) -> list[LocalAgent]:
-        available = bool(shutil.which(self.binary) or Path(self.binary).is_file())
+        available = executable_available(self.binary)
         return [LocalAgent(
             local_ref=str(self.definition.get("local_ref") or "claude:default"),
             adapter="claude", display_name=str(self.definition.get("display_name") or "Claude Code"),
@@ -88,7 +90,7 @@ class ClaudeAdapter:
 
     async def execute(self, request: RunRequest, emit: Emit,
                       control: RunControl) -> None:
-        if not (shutil.which(self.binary) or Path(self.binary).is_file()):
+        if not executable_available(self.binary):
             raise RuntimeError("没有找到 Claude Code 命令，请重新扫描本机 Agent")
         workdir = Path(str(self.definition.get("workdir") or Path.home())).expanduser().resolve()
         workdir.mkdir(parents=True, exist_ok=True)
@@ -121,7 +123,8 @@ class ClaudeAdapter:
         proc = await asyncio.create_subprocess_exec(
             *command, cwd=str(workdir), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, limit=64 * 1024 * 1024)
+            start_new_session=True, limit=64 * 1024 * 1024,
+            **subprocess_options())
         started = False
         sequence = 0
         final_text = ""

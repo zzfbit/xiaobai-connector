@@ -58,7 +58,10 @@ class ConnectorConfig:
             device_id=str(value.get("device_id") or ""),
             device_name=str(value.get("device_name") or platform.node()),
             platform=str(value.get("platform") or current_platform()),
-            connector_version=str(value.get("connector_version") or __version__),
+            # The advertised version belongs to the running Connector binary;
+            # do not keep reporting the version from an older config file after
+            # a user installs a bug-fix build.
+            connector_version=__version__,
             workdir=str(value.get("workdir") or Path.home()),
             sandbox=sandbox,
             agents=[dict(item) for item in agents],
